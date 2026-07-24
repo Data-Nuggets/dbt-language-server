@@ -191,7 +191,7 @@ class AthenaTarget(ProfileTarget):
 
 @dataclass(kw_only=True)
 class GlueTarget(ProfileTarget):
-    project_name: str
+    project_name: str | None = None
     role_arn: str
     region: str
     workers: int
