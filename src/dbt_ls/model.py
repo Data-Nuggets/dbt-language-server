@@ -10,9 +10,17 @@ from ibis.expr.schema import Schema
 from ibis.expr.types.relations import Table
 
 from dbt_ls.column import Column
-from dbt_ls.profiles import (AthenaTarget, DatabaseTarget, DatabricksTarget,
-                             DuckDBTarget, GlueTarget, MSSQLTarget,
-                             MySQLTarget, ProfileTarget, SparkTarget)
+from dbt_ls.profiles import (
+    AthenaTarget,
+    DatabaseTarget,
+    DatabricksTarget,
+    DuckDBTarget,
+    GlueTarget,
+    MSSQLTarget,
+    MySQLTarget,
+    ProfileTarget,
+    SparkTarget,
+)
 from dbt_ls.project import Project
 from dbt_ls.source import SourceTable
 

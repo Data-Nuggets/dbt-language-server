@@ -1,8 +1,17 @@
 import pytest
 
-from dbt_ls.profiles import (AthenaTarget, DatabaseTarget, DatabricksTarget,
-                             DuckDBTarget, GlueTarget, MSSQLTarget,
-                             MySQLTarget, ProfileTarget, Secret, SparkTarget)
+from dbt_ls.profiles import (
+    AthenaTarget,
+    DatabaseTarget,
+    DatabricksTarget,
+    DuckDBTarget,
+    GlueTarget,
+    MSSQLTarget,
+    MySQLTarget,
+    ProfileTarget,
+    Secret,
+    SparkTarget,
+)
 
 
 @pytest.mark.parametrize(

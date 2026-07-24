@@ -11,8 +11,11 @@ from pygls.uris import to_fs_path
 from dbt_ls import __version__
 from dbt_ls.alias import parse_aliases
 from dbt_ls.exceptions import *
-from dbt_ls.model import (discover_models, enrich_models_from_database,
-                          filter_documented_database_sources)
+from dbt_ls.model import (
+    discover_models,
+    enrich_models_from_database,
+    filter_documented_database_sources,
+)
 from dbt_ls.pattern import completion_context, ref_model_at
 from dbt_ls.profiles import Profiles
 from dbt_ls.project import Project
@@ -169,8 +172,6 @@ def load_project(ls: DbtLanguageServer):
         ls.work_done_progress.end(
             token, types.WorkDoneProgressEnd(message="❌ImportError")
         )
-
-    # root_path = ls.workspace.root_path
 
     ls.work_done_progress.end(token, types.WorkDoneProgressEnd(message="Finished"))
 
