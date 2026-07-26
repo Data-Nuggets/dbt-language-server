@@ -14,7 +14,7 @@ from dbt_ls.exceptions import *
 from dbt_ls.pattern import completion_context, ref_model_at
 from dbt_ls.profiles import Profiles
 from dbt_ls.project import Project
-from dbt_ls.source import enrich_sources_from_catalog
+from dbt_ls.source import IGNORED_DIRS, enrich_sources_from_catalog
 from dbt_ls.state import ProjectState
 
 logging.basicConfig(
@@ -41,8 +41,16 @@ server = DbtLanguageServer()
 
 
 def find_dbt_project_root(root: str) -> str:
+    # Mirror Neovim's root_markers: first walk UP from the opened path looking
+    # for a dbt_project.yml, so opening a subfolder of the project still finds
+    # the real root (VS Code sends the opened folder as-is, not the project root).
+    start = Path(root)
+    for directory in (start, *start.parents):
+        if (directory / "dbt_project.yml").is_file():
+            return str(directory)
+    # Otherwise search downward — e.g. when a parent of the project was opened.
     for p in Path(root).rglob("dbt_project.yml"):
-        if "target" not in p.parts:
+        if not IGNORED_DIRS.intersection(p.parts):
             return str(p.parent)
     return "."
 
@@ -57,8 +65,10 @@ def _load_project(root_path: str | None = None) -> ProjectState:
     if not dbt_root:
         log.warning("No dbt project root found under %s; skipping discovery", root_path)
         raise NoDbtRootError
+    log.info("Resolved dbt project root: %s (from opened path %s)", dbt_root, root_path)
 
     project = Project(dbt_root)
+    log.info("Project %r uses profile %r", project.config.get("name", ""), project.profile)
 
     # ProjectState requires a resolved profile target up front, so resolve the
     # profile before constructing it.
@@ -67,10 +77,23 @@ def _load_project(root_path: str | None = None) -> ProjectState:
         log.info("No dbt profile located; skipping database enrichment")
         raise NoDbtProfileError
 
+    if not project.profile:
+        log.info(
+            "dbt_project.yml has no `profile:` key; skipping database enrichment"
+        )
+        raise NoDbtProfileTargetError
+
     try:
         profile_target = profile.resolve(project.profile)
     except EnvVarError as e:
         log.error("Environment variable not set for profile %r", project.profile)
+        raise NoDbtProfileTargetError from e
+    except KeyError as e:
+        log.error(
+            "Profile %r has no matching profile/target %s in profiles.yml",
+            project.profile,
+            e,
+        )
         raise NoDbtProfileTargetError from e
     else:
         if not profile_target:
@@ -165,8 +188,11 @@ def load_project(ls: DbtLanguageServer):
         ls.work_done_progress.end(token, types.WorkDoneProgressEnd(message="Finished"))
 
 
-@server.feature(types.INITIALIZE)
-def on_initialize(ls: DbtLanguageServer, params: types.ParameterInformation):
+@server.feature(types.INITIALIZED)
+def on_initialized(ls: DbtLanguageServer, params: types.InitializedParams):
+    # Discovery runs on the `initialized` notification, not the `initialize`
+    # request: the client only services server-initiated requests (e.g.
+    # window/workDoneProgress/create) once the handshake has completed.
     load_project(ls)
 
 

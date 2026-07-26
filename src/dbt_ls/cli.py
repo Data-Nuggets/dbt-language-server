@@ -1,15 +1,13 @@
 import argparse
 import logging
+import sys
 
 from dbt_ls import __version__
 from dbt_ls.server import server
 
-print(__version__)
-
 
 def main():
-    banner = f"""
-   ╔═══════════════════════════════════════╗
+    banner = f""" ╔═══════════════════════════════════════╗
    ║                                       ║
    ║      _ _     _        _               ║
    ║   __| | |__ | |_     | |___           ║
@@ -21,9 +19,12 @@ def main():
    ║                                       ║
    ╚═══════════════════════════════════════╝
     """
-    print(banner)
+    print(banner, file=sys.stderr)
 
     p = argparse.ArgumentParser()
+    # stdio is the default transport; --stdio is accepted (as a no-op) because
+    # LSP clients such as VS Code pass it to select the stdio transport.
+    p.add_argument("--stdio", action="store_true")
     p.add_argument("--tcp", action="store_true")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8765)

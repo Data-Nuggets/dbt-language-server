@@ -1,0 +1,57 @@
+{
+  "name": "dbt-ls",
+  "displayName": "dbt Language Server",
+  "description": "Database-aware dbt LSP: ref/source completion and go-to-definition.",
+  "version": "0.1.1",
+  "publisher": "Datanuggets",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Data-Nuggets/dbt-language-server"
+  },
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:sql"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "dbt-ls.reload",
+        "title": "dbt-ls: Reload project"
+      }
+    ],
+    "configuration": {
+      "title": "dbt-ls",
+      "properties": {
+        "dbtLs.serverCommand": {
+          "type": "string",
+          "default": "dbt-ls",
+          "description": "Command used to launch the dbt language server. Point this at an absolute path (e.g. /path/to/venv/bin/dbt-ls) if `dbt-ls` is not on PATH."
+        },
+        "dbtLs.serverArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra arguments passed to the server command."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.75.0"
+  },
+  "scripts": {
+    "package": "vsce package"
+  }
+}

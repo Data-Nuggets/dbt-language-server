@@ -6,6 +6,11 @@ import yaml
 
 from dbt_ls.column import Column
 
+# Directories to skip when walking a project tree: build artifacts, installed
+# packages and VCS metadata — notably `.venv`, which ships its own bundled
+# dbt_project.yml files inside the dbt package.
+IGNORED_DIRS = {"target", ".venv", "venv", ".git", "dbt_packages", "node_modules"}
+
 
 @dataclass(frozen=True)
 class SourceTable:
@@ -18,9 +23,8 @@ class SourceTable:
 
 def discover_sources(root: str) -> list:
     sources = []
-    ignored_dirs = {"target", ".venv", "venv", ".git", "dbt_packages", "node_modules"}
     for p in Path(root).rglob("*.yml"):
-        if ignored_dirs.intersection(p.parts) or not p.is_file():
+        if IGNORED_DIRS.intersection(p.parts) or not p.is_file():
             continue
         if any(part.startswith(".") for part in p.relative_to(root).parts[:-1]):
             continue
