@@ -11,15 +11,10 @@ from pygls.uris import to_fs_path
 from dbt_ls import __version__
 from dbt_ls.alias import parse_aliases
 from dbt_ls.exceptions import *
-from dbt_ls.model import (
-    discover_models,
-    enrich_models_from_database,
-    filter_documented_database_sources,
-)
 from dbt_ls.pattern import completion_context, ref_model_at
 from dbt_ls.profiles import Profiles
 from dbt_ls.project import Project
-from dbt_ls.source import discover_sources, enrich_sources_from_catalog
+from dbt_ls.source import enrich_sources_from_catalog
 from dbt_ls.state import ProjectState
 
 logging.basicConfig(
@@ -37,7 +32,9 @@ class DbtLanguageServer(LanguageServer):
 
     def __init__(self):
         super().__init__("dbt-ls", __version__)
-        self.state = ProjectState()
+        # Built during `initialize`, once we have a project root and a resolved
+        # profile target — ProjectState now requires both up front.
+        self.state: ProjectState | None = None
 
 
 server = DbtLanguageServer()
@@ -52,8 +49,6 @@ def find_dbt_project_root(root: str) -> str:
 
 def _load_project(root_path: str | None = None) -> ProjectState:
 
-    state = ProjectState()
-
     if not root_path:
         log.warning("Initialize received no root_path; skipping project discovery")
         raise NoRootPathError
@@ -65,46 +60,47 @@ def _load_project(root_path: str | None = None) -> ProjectState:
 
     project = Project(dbt_root)
 
-    # Models and sources don't need the profile, so resolve them unconditionally.
-    models = discover_models(root=root_path, model_paths=project.model_paths)
-    log.debug("Finished parsing documented models")
-
-    sources = discover_sources(root_path)
-    log.debug("Finished parsing documented sources")
-
-    # Catalog enrichment — only if the catalog has actually been generated.
-    catalog_path = Path(dbt_root) / "target" / "catalog.json"
-    if catalog_path.is_file():
-        sources = enrich_sources_from_catalog(sources, catalog_path)
-        log.debug("Finished parsing column info for sources from catalog")
-    else:
-        log.info("No catalog.json at %s; skipping catalog enrichment", catalog_path)
-
-    state.dbt_root = dbt_root
-    state.project = project
-    state.models = models
-    state.sources = sources
-
-    # Database enrichment — needs a fully resolved profile target.
+    # ProjectState requires a resolved profile target up front, so resolve the
+    # profile before constructing it.
     profile = Profiles.locate(project.root)
     if not profile:
         log.info("No dbt profile located; skipping database enrichment")
         raise NoDbtProfileError
 
-    profile_target = profile.resolve(project.profile)
-    if not profile_target:
-        log.info(
-            "Profile %r resolved to an empty target; skipping database enrichment",
-            project.profile,
-        )
-        raise NoDbtProfileTargetError
-
-    log.info(f"Using profile: {profile_target}")
-
     try:
-        database_models, leftover_sources = enrich_models_from_database(
-            models, profile_target, project.root
-        )
+        profile_target = profile.resolve(project.profile)
+    except EnvVarError as e:
+        log.error("Environment variable not set for profile %r", project.profile)
+        raise NoDbtProfileTargetError from e
+    else:
+        if not profile_target:
+            log.info(
+                "Profile %r resolved to an empty target; skipping database enrichment",
+                project.profile,
+            )
+            raise NoDbtProfileTargetError
+        log.info("Using profile: %s", profile_target)
+
+    # __post_init__ discovers documented models and sources from `dbt_root`.
+    state = ProjectState(
+        project=project,
+        profile_target=profile_target,
+        dbt_root=dbt_root,
+    )
+    log.debug("Finished parsing documented models and sources")
+
+    # Catalog enrichment — only if the catalog has actually been generated.
+    catalog_path = Path(dbt_root) / "target" / "catalog.json"
+    if catalog_path.is_file():
+        state.refresh_from_catalog()
+        state.sources = enrich_sources_from_catalog(state.sources, catalog_path)
+        log.debug("Finished parsing column info from catalog")
+    else:
+        log.info("No catalog.json at %s; skipping catalog enrichment", catalog_path)
+
+    # Database enrichment — needs a fully resolved profile target.
+    try:
+        state.refresh_from_database()
     except ImportError as exc:
         # ibis wraps the real ModuleNotFoundError in its own ImportError, so
         # walk the cause chain to find the name of the package actually missing.
@@ -122,19 +118,12 @@ def _load_project(root_path: str | None = None) -> ProjectState:
             missing,
             exc,
         )
+        raise ImportError
     except Exception:  # noqa: BLE001 — enrichment must never crash initialize
         log.exception(
             "Database enrichment failed; continuing with documented models only"
         )
     else:
-        if database_models:
-            state.models = database_models
-        if leftover_sources:
-            documented_sources, undocumented_sources = (
-                filter_documented_database_sources(sources, leftover_sources)
-            )
-            state.sources = documented_sources
-            log.debug("Replaced sources with leftover sources")
         log.info("Finished parsing column info for models from database")
 
     return state
@@ -170,10 +159,10 @@ def load_project(ls: DbtLanguageServer):
         )
     except ImportError:
         ls.work_done_progress.end(
-            token, types.WorkDoneProgressEnd(message="❌ImportError")
+            token, types.WorkDoneProgressEnd(message="❌Missing dependency (see logs)")
         )
-
-    ls.work_done_progress.end(token, types.WorkDoneProgressEnd(message="Finished"))
+    else:
+        ls.work_done_progress.end(token, types.WorkDoneProgressEnd(message="Finished"))
 
 
 @server.feature(types.INITIALIZE)
@@ -188,6 +177,8 @@ def reload(ls: DbtLanguageServer):
 
 @server.command("dbt-ls.current_model")
 def current_model(ls: DbtLanguageServer, model_uri):
+    if ls.state is None:
+        return None
     path = to_fs_path(model_uri)
     candidate_model = [model for model in ls.state.models if path == str(model.path)]
     return (
@@ -207,6 +198,8 @@ def current_model(ls: DbtLanguageServer, model_uri):
     types.CompletionOptions(trigger_characters=["'", '"', "(", "."]),
 )
 def completions(ls: DbtLanguageServer, params: types.CompletionParams):
+    if ls.state is None:
+        return None
     models = ls.state.models
     sources = ls.state.sources
     dbt_root = ls.state.dbt_root
@@ -287,6 +280,8 @@ def completions(ls: DbtLanguageServer, params: types.CompletionParams):
 @server.feature(types.TEXT_DOCUMENT_DEFINITION)
 def definition(ls: DbtLanguageServer, params: types.DefinitionParams):
     """Jump from a ref('model') to that model's .sql file."""
+    if ls.state is None:
+        return None
     document = ls.workspace.get_text_document(params.text_document.uri)
     pos = params.position
     line = document.lines[pos.line] if pos.line < len(document.lines) else ""

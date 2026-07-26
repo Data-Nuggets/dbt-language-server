@@ -16,3 +16,7 @@ class NoDbtProfileError(DbtLsError):
 
 class NoDbtProfileTargetError(DbtLsError):
     pass
+
+
+class EnvVarError(DbtLsError):
+    """Env var is unset and has no defaults"""

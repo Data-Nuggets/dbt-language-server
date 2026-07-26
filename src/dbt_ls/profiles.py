@@ -7,9 +7,7 @@ from typing import Any, Union, get_args, get_origin, get_type_hints
 import yaml
 from jinja2.sandbox import SandboxedEnvironment
 
-
-class EnvVarError(Exception):
-    """Env var is unset and has no defaults"""
+from dbt_ls.exceptions import EnvVarError
 
 
 class Secret:

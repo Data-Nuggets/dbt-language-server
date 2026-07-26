@@ -38,7 +38,17 @@ def model_file(tmp_path):
 
 
 def _fake_ls(line: str, models: list[Model]) -> FakeServer:
-    return FakeServer(FakeDoc(line), ProjectState(models=models))
+    # ProjectState now requires `project` and `profile_target`. The definition
+    # handler only reads `state.models`, so pass placeholders for those. Point
+    # `dbt_root` at a nonexistent path so source/model discovery in
+    # __post_init__ is a cheap no-op instead of scanning the repo.
+    state = ProjectState(
+        project=None,
+        profile_target=None,
+        models=models,
+        dbt_root="/nonexistent",
+    )
+    return FakeServer(FakeDoc(line), state)
 
 
 def test_definition_jumps_to_model_file(model_file):

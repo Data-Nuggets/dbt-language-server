@@ -1,10 +1,11 @@
 import json
 import os
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable
 
 import ibis
+import yaml
 from ibis import BaseBackend
 from ibis.expr.schema import Schema
 from ibis.expr.types.relations import Table
@@ -22,7 +23,13 @@ from dbt_ls.profiles import (
     SparkTarget,
 )
 from dbt_ls.project import Project
-from dbt_ls.source import SourceTable
+from dbt_ls.source import SourceTable, discover_sources
+
+
+class SourcedList(list):
+    def __init__(self, iterable=(), *, source: str):
+        super().__init__(iterable)
+        self.source = source
 
 
 @dataclass(frozen=True)
@@ -50,11 +57,14 @@ class Model:
 
 
 def discover_models(root: str, model_paths: list[str]) -> list[Model]:
-    return [
-        Model(name=p.stem, path=p)
-        for model_path in model_paths
-        for p in (Path(root) / model_path).rglob("*.sql")
-    ]
+    return SourcedList(
+        [
+            Model(name=p.stem, path=p)
+            for model_path in model_paths
+            for p in (Path(root) / model_path).rglob("*.sql")
+        ],
+        source="discover_models",
+    )
 
 
 def enrich_models_from_catalog(models: list[Model], catalog_path: Path) -> list[Model]:
@@ -76,10 +86,15 @@ def enrich_models_from_catalog(models: list[Model], catalog_path: Path) -> list[
             for c in node.get("columns", {}).values()
         )
 
-    return [
-        Model(name=m.name, path=m.path, columns=columns_by_name.get(m.name, m.columns))
-        for m in models
-    ]
+    return SourcedList(
+        [
+            Model(
+                name=m.name, path=m.path, columns=columns_by_name.get(m.name, m.columns)
+            )
+            for m in models
+        ],
+        source="enrich_models_from_catalog",
+    )
 
 
 def get_duckdb_models(
@@ -201,10 +216,17 @@ def get_databricks_models(
         leftover_sources = columns_by_name.keys() - [m.name for m in models]
 
         return (
-            [
-                Model(name=m.name, path=m.path, columns=columns_by_name.get(m.name, ()))
-                for m in models
-            ],
+            SourcedList(
+                [
+                    Model(
+                        name=m.name,
+                        path=m.path,
+                        columns=columns_by_name.get(m.name, ()),
+                    )
+                    for m in models
+                ],
+                source="enrich_models_from_database",
+            ),
             [
                 SourceTable(
                     name=s, source_name="<unknown>", columns=columns_by_name.get(s, ())
@@ -237,10 +259,13 @@ def get_athena_models(
     leftover_sources = columns_by_name.keys() - [m.name for m in models]
 
     return (
-        [
-            Model(name=m.name, path=m.path, columns=columns_by_name.get(m.name, ()))
-            for m in models
-        ],
+        SourcedList(
+            [
+                Model(name=m.name, path=m.path, columns=columns_by_name.get(m.name, ()))
+                for m in models
+            ],
+            source="enrich_models_from_database",
+        ),
         [
             SourceTable(
                 name=s, source_name="<unknown>", columns=columns_by_name.get(s, ())
@@ -270,10 +295,13 @@ def get_glue_models(
     leftover_sources = columns_by_name.keys() - [m.name for m in models]
 
     return (
-        [
-            Model(name=m.name, path=m.path, columns=columns_by_name.get(m.name, ()))
-            for m in models
-        ],
+        SourcedList(
+            [
+                Model(name=m.name, path=m.path, columns=columns_by_name.get(m.name, ()))
+                for m in models
+            ],
+            source="enrich_models_from_database",
+        ),
         [
             SourceTable(
                 name=s, source_name="<unknown>", columns=columns_by_name.get(s, ())
@@ -316,10 +344,13 @@ def _get_database_schema(
     leftover_sources = columns_by_name.keys() - [m.name for m in models]
 
     return (
-        [
-            Model(name=m.name, path=m.path, columns=columns_by_name.get(m.name, ()))
-            for m in models
-        ],
+        SourcedList(
+            [
+                Model(name=m.name, path=m.path, columns=columns_by_name.get(m.name, ()))
+                for m in models
+            ],
+            source="enrich_models_from_database",
+        ),
         [
             SourceTable(
                 name=s, source_name="<unknown>", columns=columns_by_name.get(s, ())
@@ -358,3 +389,36 @@ def enrich_models_from_database(
     if fn is None:
         return ([], [])
     return fn(models, profile_target, project_root)
+
+
+def enrich_models_from_config(dbt_root: str) -> list[Model]:
+
+    def _parse_config(config: dict):
+        if "models" not in config.keys():
+            return []
+
+        return [
+            Model(
+                m["name"],
+                Path("foopath"),
+                tuple(Column(c["name"]) for c in m["columns"]),
+            )
+            for m in config["models"]
+        ]
+
+    models: list[Model] = []
+    config_files = []
+
+    for root, dirs, files in os.walk(dbt_root):
+        for file in files:
+            if file.endswith(".yml") or file.endswith(".yaml"):
+                if file != "dbt_project.yml":
+                    config_files.append(os.path.join(root, file))
+
+    for cf in config_files:
+        with open(cf) as f:
+            config = yaml.safe_load(f) or {}
+            if parsed_models := _parse_config(config):
+                models.extend(parsed_models)
+
+    return SourcedList(models, source="parse_models_from_config")
