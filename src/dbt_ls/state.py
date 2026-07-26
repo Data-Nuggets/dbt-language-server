@@ -4,6 +4,7 @@ from pathlib import Path
 
 from dbt_ls.model import (
     Model,
+    SourcedList,
     discover_models,
     enrich_models_from_catalog,
     enrich_models_from_config,
@@ -36,12 +37,16 @@ class ProjectState:
             self.sources = discover_sources(self.dbt_root)
 
     def refresh_from_catalog(self):
-        self.models = enrich_models_from_catalog(
+        models = enrich_models_from_catalog(
             self.models, Path(os.path.join(self.dbt_root, "target", "catalog.json"))
         )
+        if models:
+            self.reconciliate_models(models)
 
     def refresh_from_config(self):
-        self.models = enrich_models_from_config(self.dbt_root)
+        models = enrich_models_from_config(self.dbt_root)
+        if models:
+            self.reconciliate_models(models)
 
     def refresh_from_database(self):
         models, leftover_sources = enrich_models_from_database(
@@ -50,9 +55,32 @@ class ProjectState:
             project_root=self.dbt_root,
         )
         if models:
-            self.models = models
+            self.reconciliate_models(models)
         if leftover_sources:
             documented_sources, undocumented_sources = (
                 filter_documented_database_sources(self.sources, leftover_sources)
             )
             self.sources = documented_sources
+
+    def reconciliate_models(self, models: list[Model]):
+        """
+        Compares two lists of models and find duplicates.
+        The output is deduplicated model list with most information.
+
+        discover_models(...) finds all the model files and adds a path information
+        parse_models_from_config(...) finds documented models with columns w/o data types
+        enrich_models_from_catalog(...) finds all written models with columns w/ data types
+        enrich_models_from_database(...) finds all the table information from the datasource
+
+        TODO: Create some kind of priority for the above and compare on that
+        """
+
+        by_name: dict[str, Model] = {m.name: m for m in self.models}
+        for model in models:
+            existing = by_name.get(model.name)
+            if existing is not None:
+                by_name[model.name] = existing.merged_with(model)
+            else:
+                by_name[model.name] = model
+
+        self.models = SourcedList(by_name.values(), source="reconciliate_models")

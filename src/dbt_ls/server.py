@@ -68,7 +68,9 @@ def _load_project(root_path: str | None = None) -> ProjectState:
     log.info("Resolved dbt project root: %s (from opened path %s)", dbt_root, root_path)
 
     project = Project(dbt_root)
-    log.info("Project %r uses profile %r", project.config.get("name", ""), project.profile)
+    log.info(
+        "Project %r uses profile %r", project.config.get("name", ""), project.profile
+    )
 
     # ProjectState requires a resolved profile target up front, so resolve the
     # profile before constructing it.
@@ -78,9 +80,7 @@ def _load_project(root_path: str | None = None) -> ProjectState:
         raise NoDbtProfileError
 
     if not project.profile:
-        log.info(
-            "dbt_project.yml has no `profile:` key; skipping database enrichment"
-        )
+        log.info("dbt_project.yml has no `profile:` key; skipping database enrichment")
         raise NoDbtProfileTargetError
 
     try:
@@ -111,6 +111,13 @@ def _load_project(root_path: str | None = None) -> ProjectState:
         dbt_root=dbt_root,
     )
     log.debug("Finished parsing documented models and sources")
+
+    # Config enrichment - parses the hand written .yml files. Never let a
+    # malformed config abort initialization.
+    try:
+        state.refresh_from_config()
+    except Exception:  # noqa: BLE001
+        log.exception("Config enrichment failed; continuing without it")
 
     # Catalog enrichment — only if the catalog has actually been generated.
     catalog_path = Path(dbt_root) / "target" / "catalog.json"

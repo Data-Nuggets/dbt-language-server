@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -23,13 +24,28 @@ from dbt_ls.profiles import (
     SparkTarget,
 )
 from dbt_ls.project import Project
-from dbt_ls.source import SourceTable, discover_sources
+from dbt_ls.source import IGNORED_DIRS, SourceTable, discover_sources
+
+log = logging.getLogger("dbt_ls")
 
 
 class SourcedList(list):
     def __init__(self, iterable=(), *, source: str):
         super().__init__(iterable)
         self.source = source
+
+    def __contains__(self, item) -> bool:
+        if isinstance(item, str):
+            return any(m.name == item for m in self)
+        return super().__contains__(item)
+
+    def __getitem__(self, key):
+        if isinstance(key, str):
+            for m in self:
+                if m.name == key:
+                    return m
+            raise KeyError(key)
+        return super().__getitem__(key)
 
 
 @dataclass(frozen=True)
@@ -54,6 +70,17 @@ class Model:
                 return ".".join(path.relative_to(full_model_path).with_suffix("").parts)
 
         return None
+
+    def merged_with(self, other: "Model") -> "Model":
+        """Combine two discovered views of the same model.
+
+        Keeps this model's identity (name/path) but adopts `other`'s columns
+        when `other` has any — so a richer source (config/catalog/db) fills in
+        column info without clobbering the real file path.
+        """
+        if not other.columns:
+            return self
+        return replace(self, columns=other.columns)
 
 
 def discover_models(root: str, model_paths: list[str]) -> list[Model]:
@@ -410,15 +437,28 @@ def enrich_models_from_config(dbt_root: str) -> list[Model]:
     config_files = []
 
     for root, dirs, files in os.walk(dbt_root):
+        # Prune build artifacts / installed packages (e.g. `.venv`) in place so
+        # os.walk never descends into them.
+        dirs[:] = [d for d in dirs if d not in IGNORED_DIRS]
         for file in files:
             if file.endswith(".yml") or file.endswith(".yaml"):
                 if file != "dbt_project.yml":
                     config_files.append(os.path.join(root, file))
 
     for cf in config_files:
-        with open(cf) as f:
-            config = yaml.safe_load(f) or {}
-            if parsed_models := _parse_config(config):
-                models.extend(parsed_models)
+        try:
+            with open(cf) as f:
+                config = yaml.safe_load(f) or {}
+        except (yaml.YAMLError, UnicodeDecodeError, OSError) as exc:
+            log.warning("Skipping unreadable config file %s: %s", cf, exc)
+            continue
+
+        # A .yml whose top level is a list/scalar isn't a dbt config; skip it
+        # rather than letting `_parse_config` hit `.keys()` on a non-dict.
+        if not isinstance(config, dict):
+            continue
+
+        if parsed_models := _parse_config(config):
+            models.extend(parsed_models)
 
     return SourcedList(models, source="parse_models_from_config")
