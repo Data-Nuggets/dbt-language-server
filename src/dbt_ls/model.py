@@ -429,7 +429,7 @@ def enrich_models_from_config(dbt_root: str) -> list[Model]:
         return [
             Model(
                 m["name"],
-                Path("foopath"),
+                Path(""),
                 tuple(Column(c["name"]) for c in m["columns"]),
             )
             for m in config["models"]
