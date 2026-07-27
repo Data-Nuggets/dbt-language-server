@@ -12,9 +12,8 @@ The server is a Python package, so installation is two parts:
 ### 1. Install the server (requires Python 3.10+)
 
 ```bash
-pipx install "dbt-ls[postgres]"   # recommended: isolated, puts `dbt-ls` on PATH
-# or: uv tool install dbt-ls
-# or: pip install "dbt-ls[postgres]"
+uv tool install dbt-ls
+# or: uv tool install "dbt-ls[postgres]"
 ```
 
 Pick the extra that matches your warehouse: `duckdb`, `postgres`, `mysql`,
@@ -28,9 +27,7 @@ dbt-ls --help
 
 ### 2. Install the extension
 
-- From a packaged file: `code --install-extension dbt-ls-<version>.vsix`, or
-  **Extensions panel → ⋯ → Install from VSIX…**
-- From the Marketplace (once published): search "dbt Language Server".
+- From the Marketplace (once published): search "dbt Language Server" publshed by Datanuggets.
 
 If `dbt-ls` is not on your PATH (e.g. it lives in a project venv), set
 `dbtLs.serverCommand` to its absolute path in your VS Code settings:

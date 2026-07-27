@@ -20,6 +20,9 @@
 
 
 ## Installation
+
+For VSCode installation, see [VSCode installation](editors/vscode/README.md)
+
 ~~~sh
 uv tool install dbt-ls
 
