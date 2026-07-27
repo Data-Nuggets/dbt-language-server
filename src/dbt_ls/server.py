@@ -2,6 +2,8 @@ import logging
 import os
 import sys
 import uuid
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 from lsprotocol import types
@@ -14,7 +16,7 @@ from dbt_ls.exceptions import *
 from dbt_ls.pattern import completion_context, ref_model_at
 from dbt_ls.profiles import Profiles
 from dbt_ls.project import Project
-from dbt_ls.source import IGNORED_DIRS, enrich_sources_from_catalog
+from dbt_ls.source import IGNORED_DIRS
 from dbt_ls.state import ProjectState
 
 logging.basicConfig(
@@ -27,14 +29,48 @@ logging.getLogger("pygls").setLevel(logging.WARNING)
 log = logging.getLogger("dbt_ls")
 
 
+class SchemaSource(str, Enum):
+    """A place model column information can be read from."""
+
+    CONFIG = "config"
+    CATALOG = "catalog"
+    DATABASE = "database"
+
+
+@dataclass(frozen=True)
+class Settings:
+    # Ascending priority: the last source that yields columns wins.
+    # Absent == disabled, so ("config",) never touches the warehouse.
+    schema_sources: tuple[SchemaSource, ...] = tuple(SchemaSource)
+
+
+def parse_schema_sources(raw: str) -> tuple[SchemaSource, ...]:
+    """'config,database' -> (CONFIG, DATABASE). Raises ValueError on typos."""
+    names = [part.strip() for part in raw.split(",") if part.strip()]
+    seen: dict[SchemaSource, None] = {}
+    for name in names:
+        try:
+            source = SchemaSource(name.lower())
+        except ValueError:
+            valid = ", ".join(s.value for s in SchemaSource)
+            raise ValueError(
+                f"unknown schema source {name!r}; expected one of: {valid}"
+            )
+        # Re-listing a source moves it later — dedupe keeping the LAST
+        # occurrence, since that's the run whose columns actually survive.
+        seen.pop(source, None)
+        seen[source] = None
+
+    return tuple(seen)
+
+
 class DbtLanguageServer(LanguageServer):
     """Language server that carries the discovered dbt project on `.state`."""
 
     def __init__(self):
         super().__init__("dbt-ls", __version__)
-        # Built during `initialize`, once we have a project root and a resolved
-        # profile target — ProjectState now requires both up front.
         self.state: ProjectState | None = None
+        self.settings: Settings = Settings()
 
 
 server = DbtLanguageServer()
@@ -55,7 +91,7 @@ def find_dbt_project_root(root: str) -> str:
     return "."
 
 
-def _load_project(root_path: str | None = None) -> ProjectState:
+def _load_project(root_path: str | None, settings: Settings) -> ProjectState:
 
     if not root_path:
         log.warning("Initialize received no root_path; skipping project discovery")
@@ -112,49 +148,47 @@ def _load_project(root_path: str | None = None) -> ProjectState:
     )
     log.debug("Finished parsing documented models and sources")
 
-    # Config enrichment - parses the hand written .yml files. Never let a
-    # malformed config abort initialization.
-    try:
-        state.refresh_from_config()
-    except Exception:  # noqa: BLE001
-        log.exception("Config enrichment failed; continuing without it")
-
-    # Catalog enrichment — only if the catalog has actually been generated.
-    catalog_path = Path(dbt_root) / "target" / "catalog.json"
-    if catalog_path.is_file():
-        state.refresh_from_catalog()
-        state.sources = enrich_sources_from_catalog(state.sources, catalog_path)
-        log.debug("Finished parsing column info from catalog")
+    # Column enrichment. Each source is run in ascending priority order, so the
+    # last one that yields columns for a model is the one that wins. A source
+    # left out of `schema_sources` is never run at all
+    refreshers = {
+        SchemaSource.CONFIG: state.refresh_from_config,
+        SchemaSource.CATALOG: state.refresh_from_catalog,
+        SchemaSource.DATABASE: state.refresh_from_database,
+    }
+    if not settings.schema_sources:
+        log.warning("No schema sources enabled; models will have no column info")
     else:
-        log.info("No catalog.json at %s; skipping catalog enrichment", catalog_path)
+        log.info(f"Running with source settings: {settings}")
 
-    # Database enrichment — needs a fully resolved profile target.
-    try:
-        state.refresh_from_database()
-    except ImportError as exc:
-        # ibis wraps the real ModuleNotFoundError in its own ImportError, so
-        # walk the cause chain to find the name of the package actually missing.
-        missing = "unknown"
-        err: BaseException | None = exc
-        while err is not None:
-            if isinstance(err, ImportError) and err.name:
-                missing = err.name
-                break
-            err = err.__cause__ or err.__context__
-        log.warning(
-            "Database enrichment skipped: missing dependency %r (%s). "
-            "Install the matching extra, e.g. `pip install dbt-ls[postgres]`, "
-            "then restart. Continuing with documented models only.",
-            missing,
-            exc,
-        )
-        raise ImportError
-    except Exception:  # noqa: BLE001 — enrichment must never crash initialize
-        log.exception(
-            "Database enrichment failed; continuing with documented models only"
-        )
-    else:
-        log.info("Finished parsing column info for models from database")
+    for source in settings.schema_sources:
+        log.debug("Enriching from %s", source.value)
+        try:
+            refreshers[source]()
+        except ImportError as exc:
+            # ibis wraps the real ModuleNotFoundError in its own ImportError, so
+            # walk the cause chain to find the name of the package actually missing.
+            missing = "unknown"
+            err: BaseException | None = exc
+            while err is not None:
+                if isinstance(err, ImportError) and err.name:
+                    missing = err.name
+                    break
+                err = err.__cause__ or err.__context__
+            log.warning(
+                "%s enrichment skipped: missing dependency %r (%s). "
+                "Install the matching extra, e.g. `pip install dbt-ls[postgres]`, "
+                "then restart. Continuing with documented models only.",
+                source.value,
+                missing,
+                exc,
+            )
+            # Surfaced by load_project as a "missing dependency" progress message.
+            raise
+        except Exception:  # noqa: BLE001 — enrichment must never crash initialize
+            log.exception("%s enrichment failed; continuing without it", source.value)
+        else:
+            log.info("Finished parsing column info from %s", source.value)
 
     return state
 
@@ -177,7 +211,7 @@ def load_project(ls: DbtLanguageServer):
         )
 
     try:
-        ls.state = _load_project(ls.workspace.root_path)
+        ls.state = _load_project(ls.workspace.root_path, ls.settings)
     except NoDbtProfileError:
         ls.work_done_progress.end(
             token, types.WorkDoneProgressEnd(message="❌No profile found")

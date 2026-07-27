@@ -1,4 +1,4 @@
-import os
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -13,7 +13,9 @@ from dbt_ls.model import (
 )
 from dbt_ls.profiles import ProfileTarget
 from dbt_ls.project import Project
-from dbt_ls.source import SourceTable, discover_sources
+from dbt_ls.source import SourceTable, discover_sources, enrich_sources_from_catalog
+
+log = logging.getLogger("dbt_ls")
 
 
 @dataclass
@@ -37,11 +39,17 @@ class ProjectState:
             self.sources = discover_sources(self.dbt_root)
 
     def refresh_from_catalog(self):
-        models = enrich_models_from_catalog(
-            self.models, Path(os.path.join(self.dbt_root, "target", "catalog.json"))
-        )
+        # Self-guarded so callers can treat every refresh_* method as an
+        # interchangeable unit of enrichment.
+        catalog_path = Path(self.dbt_root) / "target" / "catalog.json"
+        if not catalog_path.is_file():
+            log.info("No catalog.json at %s; skipping catalog enrichment", catalog_path)
+            return
+
+        models = enrich_models_from_catalog(self.models, catalog_path)
         if models:
             self.reconciliate_models(models)
+        self.sources = enrich_sources_from_catalog(self.sources, catalog_path)
 
     def refresh_from_config(self):
         models = enrich_models_from_config(self.dbt_root)

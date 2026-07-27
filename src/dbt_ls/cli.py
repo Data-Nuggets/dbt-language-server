@@ -3,7 +3,7 @@ import logging
 import sys
 
 from dbt_ls import __version__
-from dbt_ls.server import server
+from dbt_ls.server import Settings, parse_schema_sources, server
 
 
 def main():
@@ -28,7 +28,24 @@ def main():
     p.add_argument("--tcp", action="store_true")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8765)
+    p.add_argument(
+        "--schema-sources",
+        type=str,
+        default="config,catalog,database",
+        metavar="SOURCE[,SOURCE...]",
+        help="Comma-separated model schema sources in ascending priority: the "
+        "last one that yields columns wins. Omit a source to disable it "
+        "entirely, e.g. `--schema-sources config,catalog` never connects to "
+        "the warehouse. (default: %(default)s)",
+    )
     args = p.parse_args()
+
+    try:
+        schema_sources = parse_schema_sources(args.schema_sources)
+    except ValueError as e:
+        p.error(str(e))
+    server.settings = Settings(schema_sources=schema_sources)
+
     if args.tcp:
         server.start_tcp(args.host, args.port)
     else:
