@@ -272,7 +272,8 @@ def get_athena_models(
 
     columns_by_name: dict[str, tuple[Column, ...]] = {}
 
-    client = boto3.client("athena")
+    session = boto3.Session(profile_name=profile_target.aws_profile_name or "default")
+    client = session.client("athena")
 
     tables = client.list_table_metadata(
         CatalogName=profile_target.database, DatabaseName=profile_target.schema
@@ -309,7 +310,8 @@ def get_glue_models(
 
     columns_by_name: dict[str, tuple[Column, ...]] = {}
 
-    client = boto3.client("glue")
+    session = boto3.Session(profile_name=profile_target.aws_profile_name or "default")
+    client = session.client("glue")
 
     tables = client.get_tables(DatabaseName=profile_target.schema)
 

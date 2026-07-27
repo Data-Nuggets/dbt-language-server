@@ -197,6 +197,7 @@ class GlueTarget(ProfileTarget):
     schema: str
     session_provisioning_timeout_in_seconds: int
     location: str
+    aws_profile_name: str | None = None
 
 
 _TARGET_REGISTRY: dict[str, type[ProfileTarget]] = {
