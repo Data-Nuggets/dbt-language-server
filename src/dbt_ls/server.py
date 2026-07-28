@@ -11,7 +11,7 @@ from pygls.lsp.server import LanguageServer
 from pygls.uris import to_fs_path
 
 from dbt_ls import __version__
-from dbt_ls.alias import parse_aliases
+from dbt_ls.alias import choose_alias, parse_alias_list
 from dbt_ls.exceptions import *
 from dbt_ls.pattern import completion_context, ref_model_at
 from dbt_ls.profiles import Profiles
@@ -325,9 +325,11 @@ def completions(ls: DbtLanguageServer, params: types.CompletionParams):
         ]
     elif kind == "column":
         alias = info["alias"]
-        alias_map = parse_aliases(document.source)
-        model_name = alias_map.get(alias)
-        log.info("COLUMN path: alias=%r → model=%r", alias, model_name)
+        # Alias.line_number is 1-based, LSP Position.line is 0-based.
+        cursor = (pos.line + 1, pos.character)
+        declaration = choose_alias(parse_alias_list(document.source), cursor, alias)
+        model_name = declaration.ref if declaration else None
+        log.info("COLUMN path: alias=%r @ %s → model=%r", alias, cursor, model_name)
 
         return [
             types.CompletionItem(
