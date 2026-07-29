@@ -16,6 +16,7 @@ from dbt_ls.exceptions import *
 from dbt_ls.pattern import completion_context, ref_model_at
 from dbt_ls.profiles import Profiles
 from dbt_ls.project import Project
+from dbt_ls.scope import AstCache, Position, dialect_for_profile_type, query_blocks
 from dbt_ls.source import IGNORED_DIRS
 from dbt_ls.state import ProjectState
 
@@ -71,6 +72,7 @@ class DbtLanguageServer(LanguageServer):
         super().__init__("dbt-ls", __version__)
         self.state: ProjectState | None = None
         self.settings: Settings = Settings()
+        self.ast_cache = AstCache()
 
 
 server = DbtLanguageServer()
@@ -226,6 +228,8 @@ def load_project(ls: DbtLanguageServer):
             token, types.WorkDoneProgressEnd(message="❌Missing dependency (see logs)")
         )
     else:
+        # Now that the profile is known, parse in the adapter's own dialect.
+        ls.ast_cache.dialect = dialect_for_profile_type(ls.state.profile_target.type)
         ls.work_done_progress.end(token, types.WorkDoneProgressEnd(message="Finished"))
 
 
@@ -258,6 +262,36 @@ def current_model(ls: DbtLanguageServer, model_uri):
         if candidate_model
         else None
     )
+
+
+def refresh_ast(ls: DbtLanguageServer, uri: str):
+    """Keep the cached AST in step with the buffer.
+
+    Every entry point into the cache is a document event, so completion never
+    has to parse: by the time it runs the text is mid-edit and unparseable.
+    """
+    document = ls.workspace.get_text_document(uri)
+    ls.ast_cache.refresh(uri, document.source)
+
+
+@server.feature(types.TEXT_DOCUMENT_DID_OPEN)
+def did_open(ls: DbtLanguageServer, params: types.DidOpenTextDocumentParams):
+    refresh_ast(ls, params.text_document.uri)
+
+
+@server.feature(types.TEXT_DOCUMENT_DID_CHANGE)
+def did_change(ls: DbtLanguageServer, params: types.DidChangeTextDocumentParams):
+    refresh_ast(ls, params.text_document.uri)
+
+
+@server.feature(types.TEXT_DOCUMENT_DID_SAVE)
+def did_save(ls: DbtLanguageServer, params: types.DidSaveTextDocumentParams):
+    refresh_ast(ls, params.text_document.uri)
+
+
+@server.feature(types.TEXT_DOCUMENT_DID_CLOSE)
+def did_close(ls: DbtLanguageServer, params: types.DidCloseTextDocumentParams):
+    ls.ast_cache.discard(params.text_document.uri)
 
 
 @server.feature(
@@ -327,7 +361,19 @@ def completions(ls: DbtLanguageServer, params: types.CompletionParams):
         alias = info["alias"]
         # Alias.line_number is 1-based, LSP Position.line is 0-based.
         cursor = (pos.line + 1, pos.character)
-        declaration = choose_alias(parse_alias_list(document.source), cursor, alias)
+        parsed = ls.ast_cache.get(params.text_document.uri)
+        if parsed is None:
+            log.debug("COLUMN path: no usable AST for %s", params.text_document.uri)
+            return []
+        # Block spans are offsets into `parsed.source`, so they have to be
+        # resolved against that text rather than the live buffer.
+        declaration = choose_alias(
+            cur_pos=Position(cursor[0], cursor[1]),
+            aliases=parse_alias_list(document.source),
+            alias=alias,
+            blocks=query_blocks(parsed.ast),
+            sql=parsed.source,
+        )
         model_name = declaration.ref if declaration else None
         log.info("COLUMN path: alias=%r @ %s → model=%r", alias, cursor, model_name)
 

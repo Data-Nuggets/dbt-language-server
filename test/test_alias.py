@@ -1,6 +1,8 @@
 import pytest
+import sqlglot
 
 from dbt_ls.alias import choose_alias, parse_alias_list, parse_aliases
+from dbt_ls.scope import Position, dbt_dialect, query_blocks
 
 CTES = """with artists as (
     select a.name
@@ -20,6 +22,27 @@ left join {{ ref("orders") }} o
 def refs(text: str) -> dict[str, str]:
     """alias -> referenced model/table name, dropping the position data."""
     return {alias: a.ref for alias, a in parse_aliases(text).items()}
+
+
+def resolve(
+    text: str, pos: tuple[int, int], alias: str, parsed_text: str | None = None
+):
+    """`choose_alias` with the AST wiring the server does for it.
+
+    `pos` is (1-based line, 0-based column), matching Alias. `parsed_text` is
+    the version the AST is built from — in the server that is the last buffer
+    that parsed, which lags `text` while an expression is being typed. It
+    defaults to `text` for the cases where nothing is mid-edit.
+    """
+    parsed_text = text if parsed_text is None else parsed_text
+    ast = sqlglot.parse_one(parsed_text, read=dbt_dialect("postgres"))
+    return choose_alias(
+        cur_pos=Position(*pos),
+        aliases=parse_alias_list(text),
+        alias=alias,
+        blocks=query_blocks(ast),
+        sql=parsed_text,
+    )
 
 
 @pytest.mark.parametrize(
@@ -135,10 +158,12 @@ def test_choose_alias_resolves_a_source():
         "    select e.id\n"
         "    from {{ source('raw', 'errors') }} e\n"
         ")\n"
+        # The trailing statement is what makes this parseable at all; sqlglot
+        # rejects a WITH that is followed by nothing.
+        "select * from x\n"
     )
-    aliases = parse_alias_list(text)
-    assert choose_alias(aliases, (2, 12), "e").ref == "events"
-    assert choose_alias(aliases, (6, 12), "e").ref == "errors"
+    assert resolve(text, (2, 12), "e").ref == "events"
+    assert resolve(text, (6, 12), "e").ref == "errors"
 
 
 @pytest.mark.parametrize(
@@ -155,20 +180,69 @@ def test_choose_alias_resolves_a_source():
     ],
 )
 def test_choose_alias_picks_by_position(pos, expected):
-    """`pos` is (1-based line, 0-based column), matching Alias."""
-    chosen = choose_alias(parse_alias_list(CTES), pos, "a")
+    chosen = resolve(CTES, pos, "a")
     assert (chosen.ref if chosen else None) == expected
 
 
-def test_choose_alias_ignores_position_when_unambiguous():
-    """`o` is declared once, so any cursor resolves it — including one above."""
-    for pos in [(1, 0), (12, 0), (99, 0)]:
-        chosen = choose_alias(parse_alias_list(CTES), pos, "o")
-        assert chosen is not None and chosen.ref == "orders"
+def test_choose_alias_is_scoped_even_when_unambiguous():
+    """`o` is declared once, but only in the final SELECT — being the only
+    declaration is not a licence to offer it inside the CTEs above."""
+    assert resolve(CTES, (11, 7), "o").ref == "orders"  # the block binding it
+    assert resolve(CTES, (2, 12), "o") is None  # artists CTE
+    assert resolve(CTES, (7, 13), "o") is None  # albums CTE
+
+
+def test_choose_alias_falls_back_when_no_block_covers_the_cursor():
+    """The AST lags the buffer, so a block being typed is not in it yet.
+
+    Here the cursor is above every block the parse knows about — the case a
+    jinja header or a half-written CTE at the top of the file produces. A lone
+    declaration is the best available answer; an ambiguous one still isn't.
+    """
+    assert resolve(CTES, (1, 0), "o").ref == "orders"
+    assert resolve(CTES, (1, 0), "a") is None
 
 
 def test_choose_alias_unknown_alias():
-    assert choose_alias(parse_alias_list(CTES), (2, 12), "nope") is None
+    assert resolve(CTES, (2, 12), "nope") is None
+
+
+def test_choose_alias_in_a_clause_typed_past_the_parsed_span():
+    """A block reaches to where the next one starts, not to its own last token.
+
+    sqlglot's offsets stop at whatever it managed to parse, so a WHERE typed
+    after an otherwise complete SELECT sits beyond the CTE's own span. The AST
+    here is the file without that WHERE, which is what the cache would hold.
+    """
+    live = (
+        "with artists as (\n"
+        "    select a.name\n"
+        '    from {{ ref("int_artists") }} a\n'
+        "    where a.\n"
+        "),\n"
+        "albums as (\n"
+        "    select a.title\n"
+        '    from {{ ref("int_albums") }} a\n'
+        ")\n"
+        "select * from albums\n"
+    )
+    parsed = live.replace("    where a.\n", "")
+
+    chosen = resolve(live, (4, 12), "a", parsed_text=parsed)
+    assert chosen is not None and chosen.ref == "int_artists"
+
+
+def test_choose_alias_without_any_cte():
+    """Blocks are not just CTEs — a plain SELECT binds aliases the same way."""
+    text = (
+        "select a.name\n"
+        'from {{ ref("int_artists") }} a\n'
+        "union all\n"
+        "select a.title\n"
+        'from {{ ref("int_albums") }} a\n'
+    )
+    assert resolve(text, (1, 8), "a").ref == "int_artists"
+    assert resolve(text, (4, 8), "a").ref == "int_albums"
 
 
 def test_repeated_alias_keeps_the_last_declaration():
