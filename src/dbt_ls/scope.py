@@ -1,11 +1,15 @@
 import logging
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import cached_property, lru_cache
+from pathlib import Path
 
 import sqlglot
 import sqlglot.expressions as exp
 from sqlglot.dialects.dialect import Dialect
 from sqlglot.tokenizer_core import TokenType
+
+from dbt_ls.column import Column
+from dbt_ls.model import Model
 
 log = logging.getLogger("dbt_ls")
 
@@ -142,7 +146,7 @@ def dbt_dialect(name: str):
 
     `{{ ... }}` becomes a single raw-string token usable where an identifier is
     expected, and `{% ... %}` is treated as a comment so control blocks are
-    skipped. 
+    skipped.
     """
     base = Dialect.get_or_raise(name).__class__
 
@@ -168,12 +172,28 @@ def dbt_dialect(name: str):
     return DbtDialect
 
 
+def parse_cte_models(ast: exp.Expression):
+    return tuple(
+        Model(
+            name=m.alias,
+            path=Path(""),
+            columns=tuple(Column(name=c) for c in m.named_selects),
+            model_type="CTE",
+        )
+        for m in ast.find_all(exp.CTE)
+    )
+
+
 @dataclass(frozen=True)
 class ParsedDocument:
     """A successful parse, kept together with the text it was parsed from."""
 
     source: str
     ast: exp.Expression
+
+    @cached_property
+    def models(self) -> tuple[Model, ...]:
+        return parse_cte_models(self.ast)
 
 
 class AstCache:

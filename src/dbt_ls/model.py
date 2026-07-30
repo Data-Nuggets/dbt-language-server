@@ -53,9 +53,10 @@ class Model:
     name: str
     path: Path
     columns: tuple[Column, ...] = ()
+    model_type: str = ""
 
     def __repr__(self) -> str:
-        return f"Model: {self.name}, Path: {self.path}"
+        return f"Model: {self.name}, Path: {self.path}, Model type: {self.model_type}"
 
     @staticmethod
     def get_exec_path(path: Path, project: Project) -> str | None:
