@@ -4,7 +4,7 @@ from pathlib import Path
 
 import yaml
 
-from dbt_ls.column import Column
+from dbt_ls.column import Column, HasColumns
 
 # Directories to skip when walking a project tree: build artifacts, installed
 # packages and VCS metadata — notably `.venv`, which ships its own bundled
@@ -13,7 +13,7 @@ IGNORED_DIRS = {"target", ".venv", "venv", ".git", "dbt_packages", "node_modules
 
 
 @dataclass(frozen=True)
-class SourceTable:
+class SourceTable(HasColumns):
     name: str
     source_name: str
     database: str | None = None

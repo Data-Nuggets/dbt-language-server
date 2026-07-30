@@ -18,9 +18,10 @@ from dbt_ls.model import Model
 from dbt_ls.pattern import completion_context, ref_model_at
 from dbt_ls.profiles import Profiles
 from dbt_ls.project import Project
+from dbt_ls.resolve import resolve_ctes
 from dbt_ls.scope import (
     AstCache,
-    ParsedDocument,
+    CTERef,
     Position,
     dialect_for_profile_type,
     query_blocks,
@@ -304,7 +305,7 @@ def did_close(ls: DbtLanguageServer, params: types.DidCloseTextDocumentParams):
 
 def columns_for(
     declaration: Alias,
-    parsed: ParsedDocument,
+    ctes: tuple[CTERef, ...],
     models: list[Model],
     sources: list[SourceTable],
 ) -> tuple[Column, ...]:
@@ -319,8 +320,8 @@ def columns_for(
     pools: tuple[list | tuple, ...] = {
         "model": (models,),
         "source": (sources,),
-        "cte": (parsed.ctes, models, sources),
-    }.get(declaration.ref_type, (parsed.ctes, models, sources))
+        "cte": (ctes, models, sources),
+    }.get(declaration.ref_type, (ctes, models, sources))
 
     # parse_alias_list lowercases the document, the pools keep the casing they
     # were discovered with, so the comparison has to be case-insensitive.
@@ -415,7 +416,10 @@ def completions(ls: DbtLanguageServer, params: types.CompletionParams):
             log.debug("COLUMN path: alias=%r @ %s is not in scope", alias, cursor)
             return []
 
-        columns = columns_for(declaration, parsed, models, sources)
+        # Resolved per request rather than at parse time: the types come from
+        # state, which keeps being enriched after a document is first parsed.
+        ctes = resolve_ctes(parsed.ctes, models, sources)
+        columns = columns_for(declaration, ctes, models, sources)
         log.info(
             "COLUMN path: alias=%r @ %s → %s %r, %d columns: %s",
             alias,

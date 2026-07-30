@@ -3,6 +3,11 @@ import re
 REF_RE = re.compile(r"""ref\(\s*(?P<q>['"])(?P<model>[^'"]*)$""")
 # Full ref('model') call, used to find the model the cursor is *inside of*.
 REF_FULL_RE = re.compile(r"""ref\(\s*['"](?P<model>[^'"]+)['"]""")
+# Full source('src', 'table') call. Unlike SOURCE_RE below it is not anchored,
+# so it also matches a completed call sitting anywhere in the text.
+SOURCE_FULL_RE = re.compile(
+    r"""source\(\s*['"](?P<source>[^'"]+)['"]\s*,\s*['"](?P<table>[^'"]+)['"]"""
+)
 SOURCE_RE = re.compile(
     r"""source\(\s*(?P<q1>['"])(?P<src>[^'"]*)"""
     r"""(?:(?P=q1)\s*,\s*(?P<q2>['"])(?P<tbl>[^'"]*))?$"""

@@ -11,7 +11,7 @@ from ibis import BaseBackend
 from ibis.expr.schema import Schema
 from ibis.expr.types.relations import Table
 
-from dbt_ls.column import Column
+from dbt_ls.column import Column, HasColumns
 from dbt_ls.profiles import (
     AthenaTarget,
     DatabaseTarget,
@@ -49,7 +49,7 @@ class SourcedList(list):
 
 
 @dataclass(frozen=True)
-class Model:
+class Model(HasColumns):
     name: str
     path: Path
     columns: tuple[Column, ...] = ()
