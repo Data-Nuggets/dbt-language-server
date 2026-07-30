@@ -8,6 +8,7 @@ SOURCE_RE = re.compile(
     r"""(?:(?P=q1)\s*,\s*(?P<q2>['"])(?P<tbl>[^'"]*))?$"""
 )
 COLUMN_RE = re.compile(r"(?P<alias>[a-zA-Z_]\w*)\.(?P<col>[a-zA-Z0-9_]*)$")
+FROM_RE = re.compile(r"\b(?:from|join)\s+(?P<name>\w*)$", re.IGNORECASE)
 
 
 def completion_context(line_prefix: str):
@@ -22,6 +23,8 @@ def completion_context(line_prefix: str):
         return ("ref", {})
     if m := COLUMN_RE.search(line_prefix):
         return ("column", {"alias": m.group("alias")})
+    if m := FROM_RE.search(line_prefix):
+        return ("cte", {})
     return None
 
 

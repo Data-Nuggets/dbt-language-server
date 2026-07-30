@@ -1,7 +1,7 @@
 import pytest
 import sqlglot
 
-from dbt_ls.alias import choose_alias, parse_alias_list, parse_aliases
+from dbt_ls.alias import choose_alias, parse_alias_list
 from dbt_ls.scope import Position, dbt_dialect, query_blocks
 
 CTES = """with artists as (
@@ -19,9 +19,9 @@ left join {{ ref("orders") }} o
 """
 
 
-def refs(text: str) -> dict[str, str]:
-    """alias -> referenced model/table name, dropping the position data."""
-    return {alias: a.ref for alias, a in parse_aliases(text).items()}
+def refs(text: str) -> list[tuple[str, str]]:
+    """(alias, referenced model/table name) in document order, minus positions."""
+    return [(a.alias, a.ref) for a in parse_alias_list(text)]
 
 
 def resolve(
@@ -48,23 +48,23 @@ def resolve(
 @pytest.mark.parametrize(
     "text, expected",
     [
-        ("{{ ref('accounts') }} a", {"a": "accounts"}),
-        ('{{ ref("orders") }} o', {"o": "orders"}),
-        ("{{ source('src', 'my_table') }} t", {"t": "my_table"}),
+        ("{{ ref('accounts') }} a", [("a", "accounts")]),
+        ('{{ ref("orders") }} o', [("o", "orders")]),
+        ("{{ source('src', 'my_table') }} t", [("t", "my_table")]),
         (
             "{{ ref('accounts') }} a join {{ ref('orders') }} o",
-            {"a": "accounts", "o": "orders"},
+            [("a", "accounts"), ("o", "orders")],
         ),
-        ("select 1", {}),
-        ("{{ ref('accounts') }} as a", {"a": "accounts"}),
+        ("select 1", []),
+        ("{{ ref('accounts') }} as a", [("a", "accounts")]),
         (
             "{{ ref('accounts') }} AS a join {{ ref('orders') }} o",
-            {"a": "accounts", "o": "orders"},
+            [("a", "accounts"), ("o", "orders")],
         ),
-        ("{{ source('src', 'my_table') }} as t", {"t": "my_table"}),
+        ("{{ source('src', 'my_table') }} as t", [("t", "my_table")]),
         (
             "{{ source('src', 'accounts') }} AS a join {{ ref('orders') }} o",
-            {"a": "accounts", "o": "orders"},
+            [("a", "accounts"), ("o", "orders")],
         ),
         (
             """
@@ -72,23 +72,23 @@ def resolve(
             *
         FROM {{ ref('orders') }} o
          """,
-            {"o": "orders"},
+            [("o", "orders")],
         ),
     ],
 )
-def test_parse_aliases(text, expected):
+def test_parse_alias_list(text, expected):
     assert refs(text) == expected
 
 
 def test_alias_carries_its_own_name():
-    (alias,) = parse_aliases("{{ ref('accounts') }} a").values()
+    (alias,) = parse_alias_list("{{ ref('accounts') }} a")
     assert alias.alias == "a"
     assert alias.ref == "accounts"
 
 
 def test_source_alias_is_an_alias_too():
     """Both branches must produce the same type, not Alias vs. bare str."""
-    (alias,) = parse_aliases("{{ source('src', 'my_table') }} t").values()
+    (alias,) = parse_alias_list("{{ source('src', 'my_table') }} t")
     assert alias.alias == "t"
     assert alias.ref == "my_table"
     assert alias.start == 0
@@ -104,7 +104,7 @@ def test_source_alias_is_an_alias_too():
     ],
 )
 def test_alias_position(text, line_number, column_number, start):
-    (alias,) = parse_aliases(text).values()
+    (alias,) = parse_alias_list(text)
     assert (alias.line_number, alias.column_number, alias.start) == (
         line_number,
         column_number,
@@ -114,16 +114,20 @@ def test_alias_position(text, line_number, column_number, start):
 
 def test_start_indexes_into_the_source_text():
     text = "select 1\nfrom {{ ref('orders') }} o"
-    (alias,) = parse_aliases(text).values()
+    (alias,) = parse_alias_list(text)
     assert text[alias.start :].startswith("{{ ref('orders') }}")
 
 
 def test_parse_alias_list_keeps_repeated_aliases():
-    """The dict form collapses these; the list form is what choose_alias needs."""
+    """Every declaration survives — collapsing `a` to one entry would leave
+    choose_alias nothing to pick between."""
     aliases = parse_alias_list(CTES)
+    # `albums` is the bare `from albums` — no explicit alias, so it binds to
+    # its own name.
     assert [(a.alias, a.ref) for a in aliases] == [
         ("a", "int_artists"),
         ("a", "int_albums"),
+        ("albums", "albums"),
         ("o", "orders"),
     ]
 
@@ -245,10 +249,11 @@ def test_choose_alias_without_any_cte():
     assert resolve(text, (4, 8), "a").ref == "int_albums"
 
 
-def test_repeated_alias_keeps_the_last_declaration():
-    """Keyed by alias name, so a repeated alias collapses. Documented here
-    because it is the limit a position-aware lookup would have to lift."""
+def test_repeated_alias_within_one_block_keeps_both():
+    """Two declarations of `a` on the same line stay distinct entries, each
+    carrying the position that tells them apart."""
     text = "{{ ref('accounts') }} a join {{ ref('orders') }} a"
-    aliases = parse_aliases(text)
-    assert list(aliases) == ["a"]
-    assert aliases["a"].ref == "orders"
+    accounts, orders = parse_alias_list(text)
+    assert (accounts.alias, accounts.ref) == ("a", "accounts")
+    assert (orders.alias, orders.ref) == ("a", "orders")
+    assert accounts.start < orders.start

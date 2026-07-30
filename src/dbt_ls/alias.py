@@ -17,6 +17,16 @@ REF_PATTERN = re.compile(r"""\{{\s*ref\((['"])(\w+)\1\)\s*}}\s+(?:as\s+)?(\w+)""
 SOURCE_PATTERN = re.compile(
     r"""\{{\s*source\((['"])(\w+)\1,\s*(['"])(\w+)\3\)\s*}}\s+(?:as\s+)?(\w+)"""
 )
+_NON_ALIAS = (
+    r"(?:as|on|using|where|group|order|having|limit|offset|fetch|qualify|window"
+    r"|join|inner|left|right|full|outer|cross|natural|lateral|union|except"
+    r"|intersect|select|with|and|or|not|when|then|else|end|by|partition|distinct)"
+)
+
+TABLE_PATTERN = re.compile(
+    r"\b(?:from|join)\s+(?P<table>\w+(?:\.\w+)*)"
+    r"(?:\s+(?:as\s+)?(?!" + _NON_ALIAS + r"\b)(?P<alias>\w+))?"
+)
 
 
 def line_number_from_match(text: str, match: re.Match) -> int:
@@ -41,6 +51,7 @@ class Alias:
     start: int = field(init=False)
     # Excluded from __eq__ so two Aliases parsed from the same text compare equal.
     identifier: UUID = field(default_factory=uuid4, compare=False)
+    ref_type: str = field(default_factory=str)
 
     def __post_init__(self, source_text: str, match: re.Match):
         self.line_number = line_number_from_match(source_text, match)
@@ -58,13 +69,36 @@ def parse_alias_list(text: str) -> list[Alias]:
 
     text = text.lower()
     aliases = [
-        Alias(ref=m.group(2), alias=m.group(3), source_text=text, match=m)
+        Alias(
+            ref=m.group(2),
+            alias=m.group(3),
+            source_text=text,
+            match=m,
+            ref_type="model",
+        )
         for m in REF_PATTERN.finditer(text)
     ]
     # group(4) is the source's table name; group(2) is the source_name.
     aliases += [
-        Alias(ref=m.group(4), alias=m.group(5), source_text=text, match=m)
+        Alias(
+            ref=m.group(4),
+            alias=m.group(5),
+            source_text=text,
+            match=m,
+            ref_type="source",
+        )
         for m in SOURCE_PATTERN.finditer(text)
+    ]
+    # CTE aliases
+    aliases += [
+        Alias(
+            ref=m.group("table"),
+            alias=m.group("alias") or m.group("table").rsplit(".", 1)[-1],
+            source_text=text,
+            match=m,
+            ref_type="cte",
+        )
+        for m in TABLE_PATTERN.finditer(text)
     ]
     return sorted(aliases, key=lambda a: a.start)
 
@@ -131,27 +165,3 @@ def choose_alias(
         return None
 
     return filtered_by_alias[0] if len(filtered_by_alias) == 1 else None
-
-
-def parse_aliases(text: str) -> dict[str, Alias]:
-    """Map each alias in `text` to the model or source table it refers to.
-    Keyed by alias name, so the last declaration of a repeated alias wins.
-    """
-    text = text.lower()
-    aliases: dict[str, Alias] = {}
-    for match in REF_PATTERN.finditer(text):
-        aliases[match.group(3)] = Alias(
-            ref=match.group(2),
-            alias=match.group(3),
-            source_text=text,
-            match=match,
-        )
-    for match in SOURCE_PATTERN.finditer(text):
-        # group(4) is the source's table name; group(2) is the source_name.
-        aliases[match.group(5)] = Alias(
-            ref=match.group(4),
-            alias=match.group(5),
-            source_text=text,
-            match=match,
-        )
-    return aliases

@@ -1,7 +1,7 @@
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property, lru_cache
-from pathlib import Path
+from typing import Literal
 
 import sqlglot
 import sqlglot.expressions as exp
@@ -9,7 +9,6 @@ from sqlglot.dialects.dialect import Dialect
 from sqlglot.tokenizer_core import TokenType
 
 from dbt_ls.column import Column
-from dbt_ls.model import Model
 
 log = logging.getLogger("dbt_ls")
 
@@ -172,16 +171,109 @@ def dbt_dialect(name: str):
     return DbtDialect
 
 
-def parse_cte_models(ast: exp.Expression):
-    return tuple(
-        Model(
-            name=m.alias,
-            path=Path(""),
-            columns=tuple(Column(name=c) for c in m.named_selects),
-            model_type="CTE",
+@dataclass
+class QueryColumn:
+    """One entry of a SELECT list.
+
+    `name` is the column as written upstream, `alias` the name the query
+    exposes it under — they differ whenever the select is aliased.
+    """
+
+    name: str
+    ref_alias: str | None
+    alias: str | None
+    data_type: str = field(default_factory=str)  # In case of casting
+
+    def __post_init__(self):
+        if not self.ref_alias:
+            self.ref_alias = self.name
+
+
+@dataclass
+class QueryRef:
+    """A relation in FROM/JOIN, with the selected columns attributed to it."""
+
+    table: str
+    ref_type: Literal["from", "join"]
+    alias: str = field(default_factory=str)
+    columns: list[QueryColumn] = field(default_factory=list)
+
+
+@dataclass
+class CTERef:
+    name: str
+    tables: list[QueryRef] = field(default_factory=list)
+    selects: list[QueryColumn] = field(default_factory=list)
+
+    @property
+    def columns(self) -> tuple[Column, ...]:
+        """What the CTE exposes downstream, under the names it exposes them as.
+
+        Lets a CTERef stand in wherever a Model or SourceTable does as a pool
+        of completable columns.
+        """
+        return tuple(
+            Column(name=c.alias or c.name, data_type=c.data_type or None)
+            for c in self.selects
         )
-        for m in ast.find_all(exp.CTE)
-    )
+
+
+def table_ref(
+    node: exp.Expression, ref_type: Literal["from", "join"]
+) -> QueryRef | None:
+    """QueryRef for a relation in FROM/JOIN. None for anything but a plain table.
+
+    A jinja table parses as an Identifier holding the raw `{{ ... }}` body, so
+    the name still carries the padding the tokenizer kept: " ref('albums') ".
+    """
+    if not isinstance(node, exp.Table):
+        return None
+    return QueryRef(table=node.name.strip(), ref_type=ref_type, alias=node.alias)
+
+
+def parse_cte(cte: exp.CTE) -> CTERef:
+    select = cte.this
+    cte_ref = CTERef(name=cte.alias)
+
+    # QueryRefs, in source order: FROM first, then each JOIN.
+    # sqlglot renamed the arg `from` -> `from_`; accept either.
+    from_clause = select.args.get("from_") or select.args.get("from")
+    if from_clause is not None:
+        if (ref := table_ref(from_clause.this, "from")) is not None:
+            cte_ref.tables.append(ref)
+    for join in select.args.get("joins") or []:
+        if (ref := table_ref(join.this, "join")) is not None:
+            cte_ref.tables.append(ref)
+
+    # A table with no alias is qualified by its own name instead.
+    by_alias = {t.alias or t.table: t for t in cte_ref.tables}
+    # An unqualified column is only attributable when there is one candidate.
+    sole_table = cte_ref.tables[0] if len(cte_ref.tables) == 1 else None
+
+    for e in select.selects:
+        inner = e.unalias()
+        out = e.alias_or_name
+        if isinstance(inner, exp.Column):
+            tbl, name = inner.table or None, inner.name
+            owner = by_alias.get(tbl) if tbl else sole_table
+        else:
+            # Computed selects — literals, calls, CASE, `*` — trace back to no
+            # single upstream column, so they are exposed but attributed to
+            # no table.
+            tbl, name, owner = None, out, None
+
+        column = QueryColumn(name=name, ref_alias=tbl, alias=out)
+        cte_ref.selects.append(column)
+        # The same object, so anything that resolves a type through `tables`
+        # is visible to consumers reading `selects`.
+        if owner is not None:
+            owner.columns.append(column)
+
+    return cte_ref
+
+
+def parse_ctes(ast: exp.Expression) -> tuple[CTERef, ...]:
+    return tuple(parse_cte(cte) for cte in ast.find_all(exp.CTE))
 
 
 @dataclass(frozen=True)
@@ -192,8 +284,15 @@ class ParsedDocument:
     ast: exp.Expression
 
     @cached_property
-    def models(self) -> tuple[Model, ...]:
-        return parse_cte_models(self.ast)
+    def ctes(self) -> tuple[CTERef, ...]:
+        """Purely syntactic, hence safe to cache against `source` alone.
+
+        Anything that needs the project — column data types, say — has to
+        resolve into new objects rather than mutate these, or the cache ends up
+        holding answers computed against whatever the state looked like on
+        first access.
+        """
+        return parse_ctes(self.ast)
 
 
 class AstCache:

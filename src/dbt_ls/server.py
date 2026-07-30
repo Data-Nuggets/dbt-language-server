@@ -11,13 +11,21 @@ from pygls.lsp.server import LanguageServer
 from pygls.uris import to_fs_path
 
 from dbt_ls import __version__
-from dbt_ls.alias import choose_alias, parse_alias_list
+from dbt_ls.alias import Alias, choose_alias, parse_alias_list
+from dbt_ls.column import Column
 from dbt_ls.exceptions import *
+from dbt_ls.model import Model
 from dbt_ls.pattern import completion_context, ref_model_at
 from dbt_ls.profiles import Profiles
 from dbt_ls.project import Project
-from dbt_ls.scope import AstCache, Position, dialect_for_profile_type, query_blocks
-from dbt_ls.source import IGNORED_DIRS
+from dbt_ls.scope import (
+    AstCache,
+    ParsedDocument,
+    Position,
+    dialect_for_profile_type,
+    query_blocks,
+)
+from dbt_ls.source import IGNORED_DIRS, SourceTable
 from dbt_ls.state import ProjectState
 
 logging.basicConfig(
@@ -294,9 +302,39 @@ def did_close(ls: DbtLanguageServer, params: types.DidCloseTextDocumentParams):
     ls.ast_cache.discard(params.text_document.uri)
 
 
+def columns_for(
+    declaration: Alias,
+    parsed: ParsedDocument,
+    models: list[Model],
+    sources: list[SourceTable],
+) -> tuple[Column, ...]:
+    """Columns of the relation an alias is bound to.
+
+    `ref_type` records which pattern produced the alias, so "model" and
+    "source" name their pool exactly. "cte" is a guess: TABLE_PATTERN matches
+    any bare identifier after FROM/JOIN, which may just as well be a model or
+    source referenced without ref()/source() — hence the extra pools it falls
+    back to.
+    """
+    pools: tuple[list | tuple, ...] = {
+        "model": (models,),
+        "source": (sources,),
+        "cte": (parsed.ctes, models, sources),
+    }.get(declaration.ref_type, (parsed.ctes, models, sources))
+
+    # parse_alias_list lowercases the document, the pools keep the casing they
+    # were discovered with, so the comparison has to be case-insensitive.
+    wanted = declaration.ref.casefold()
+    for pool in pools:
+        for relation in pool:
+            if relation.name.casefold() == wanted:
+                return relation.columns
+    return ()
+
+
 @server.feature(
     types.TEXT_DOCUMENT_COMPLETION,
-    types.CompletionOptions(trigger_characters=["'", '"', "(", "."]),
+    types.CompletionOptions(trigger_characters=["'", '"', "(", ".", " "]),
 )
 def completions(ls: DbtLanguageServer, params: types.CompletionParams):
     if ls.state is None:
@@ -338,7 +376,6 @@ def completions(ls: DbtLanguageServer, params: types.CompletionParams):
             for m in models
         ]
     elif kind == "source_name":
-        [log.debug(c) for m in (*models, *sources) for c in m.columns]
         log.info(
             "SOURCE path matched %r → serving %d sources: %s",
             current_line,
@@ -374,8 +411,20 @@ def completions(ls: DbtLanguageServer, params: types.CompletionParams):
             blocks=query_blocks(parsed.ast),
             sql=parsed.source,
         )
-        model_name = declaration.ref if declaration else None
-        log.info("COLUMN path: alias=%r @ %s → model=%r", alias, cursor, model_name)
+        if declaration is None:
+            log.debug("COLUMN path: alias=%r @ %s is not in scope", alias, cursor)
+            return []
+
+        columns = columns_for(declaration, parsed, models, sources)
+        log.info(
+            "COLUMN path: alias=%r @ %s → %s %r, %d columns: %s",
+            alias,
+            cursor,
+            declaration.ref_type,
+            declaration.ref,
+            len(columns),
+            [c.name for c in columns[:15]],
+        )
 
         return [
             types.CompletionItem(
@@ -383,9 +432,27 @@ def completions(ls: DbtLanguageServer, params: types.CompletionParams):
                 kind=types.CompletionItemKind(5),
                 label_details=types.CompletionItemLabelDetails(description=c.data_type),
             )
-            for m in (*models, *sources)
-            for c in m.columns
-            if m.name == model_name
+            for c in columns
+        ]
+    elif kind == "cte":
+        parsed = ls.ast_cache.get(params.text_document.uri)
+        if parsed is None:
+            log.debug("CTE path: no usable AST for %s", params.text_document.uri)
+            return []
+        ctes = parsed.ctes
+        log.info(
+            "CTE path matched %r → serving %d ctes: %s",
+            current_line,
+            len(ctes),
+            [c.name for c in ctes[:15]],
+        )
+        return [
+            types.CompletionItem(
+                c.name,
+                kind=types.CompletionItemKind(18),
+                label_details=types.CompletionItemLabelDetails(description="CTE"),
+            )
+            for c in ctes
         ]
     else:
         log.debug("no pattern matched for %r", current_line)
