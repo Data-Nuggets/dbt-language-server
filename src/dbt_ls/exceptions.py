@@ -20,3 +20,7 @@ class NoDbtProfileTargetError(DbtLsError):
 
 class EnvVarError(DbtLsError):
     """Env var is unset and has no defaults"""
+
+
+class AWSLoginRequiredError(DbtLsError):
+    pass

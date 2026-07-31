@@ -250,14 +250,18 @@ def parse_cte(cte: exp.CTE) -> CTERef:
     # An unqualified column is only attributable when there is one candidate.
     sole_table = cte_ref.tables[0] if len(cte_ref.tables) == 1 else None
 
-    for e in select.selects:
-        inner = e.unalias()
-        out = e.alias_or_name
+    for col in select.selects:
+        inner = col.unalias()
+        out = col.alias_or_name
         if isinstance(inner, exp.Column):
             tbl, name = inner.table or None, inner.name
             owner = by_alias.get(tbl) if tbl else sole_table
+        elif isinstance(inner, exp.Star):
+            # A bare `*` is every column of every relation in scope, so it is
+            # only attributable when there is exactly one to attribute it to.
+            tbl, name, owner = None, out, sole_table
         else:
-            # Computed selects — literals, calls, CASE, `*` — trace back to no
+            # Computed selects — literals, calls, CASE — trace back to no
             # single upstream column, so they are exposed but attributed to
             # no table.
             tbl, name, owner = None, out, None
@@ -285,13 +289,6 @@ class ParsedDocument:
 
     @cached_property
     def ctes(self) -> tuple[CTERef, ...]:
-        """Purely syntactic, hence safe to cache against `source` alone.
-
-        Anything that needs the project — column data types, say — has to
-        resolve into new objects rather than mutate these, or the cache ends up
-        holding answers computed against whatever the state looked like on
-        first access.
-        """
         return parse_ctes(self.ast)
 
 

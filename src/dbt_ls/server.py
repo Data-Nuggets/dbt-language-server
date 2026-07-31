@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from botocore.exceptions import LoginRefreshRequired
 from lsprotocol import types
 from pygls.lsp.server import LanguageServer
 from pygls.uris import to_fs_path
@@ -196,6 +197,9 @@ def _load_project(root_path: str | None, settings: Settings) -> ProjectState:
             )
             # Surfaced by load_project as a "missing dependency" progress message.
             raise
+        except LoginRefreshRequired as e:
+            log.error("AWS login required")
+            raise AWSLoginRequiredError from e
         except Exception:  # noqa: BLE001 — enrichment must never crash initialize
             log.exception("%s enrichment failed; continuing without it", source.value)
         else:
@@ -235,6 +239,10 @@ def load_project(ls: DbtLanguageServer):
     except ImportError:
         ls.work_done_progress.end(
             token, types.WorkDoneProgressEnd(message="❌Missing dependency (see logs)")
+        )
+    except AWSLoginRequiredError:
+        ls.work_done_progress.end(
+            token, types.WorkDoneProgressEnd(message="❌AWS login required")
         )
     else:
         # Now that the profile is known, parse in the adapter's own dialect.
