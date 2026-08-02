@@ -1,7 +1,9 @@
 import logging
+import re
 from dataclasses import dataclass, field
 from functools import cached_property, lru_cache
-from typing import Literal
+from itertools import chain
+from typing import Iterator, Literal
 
 import sqlglot
 import sqlglot.expressions as exp
@@ -11,6 +13,9 @@ from sqlglot.tokenizer_core import TokenType
 from dbt_ls.column import Column
 
 log = logging.getLogger("dbt_ls")
+
+# Placeholder column name for when parsing a mid-edit document
+PLACEHOLDER_COLUMN = "__dbt_ls_incomplete__"
 
 
 @dataclass(frozen=True)
@@ -79,7 +84,7 @@ def span_to_range(text: str, span: Span) -> Range:
 BLOCK_TYPES = (exp.Select, exp.CTE, exp.Subquery)
 
 
-def query_blocks(ast: exp.Expression) -> list[exp.Expression]:
+def query_blocks(ast: exp.Expression) -> list[exp.Expr]:
     """Every query block in the tree, outermost and nested alike."""
     return list(ast.find_all(*BLOCK_TYPES))
 
@@ -215,11 +220,25 @@ class CTERef:
         return tuple(
             Column(name=c.alias or c.name, data_type=c.data_type or None)
             for c in self.selects
+            if (c.alias or c.name) != PLACEHOLDER_COLUMN
         )
 
+@dataclass
+class ModelRef:
+    name: str
+    tables: list[QueryRef] = field(default_factory=list)
+    selects: list[QueryColumn] = field(default_factory=list)
+
+    @property
+    def columns(self) -> tuple[Column, ...]:
+        return tuple(
+            Column(name=c.alias or c.name, data_type=c.data_type or None)
+            for c in self.selects
+            if (c.alias or c.name) != PLACEHOLDER_COLUMN
+        )
 
 def table_ref(
-    node: exp.Expression, ref_type: Literal["from", "join"]
+    node: exp.Expr, ref_type: Literal["from", "join"]
 ) -> QueryRef | None:
     """QueryRef for a relation in FROM/JOIN. None for anything but a plain table.
 
@@ -280,6 +299,40 @@ def parse_ctes(ast: exp.Expression) -> tuple[CTERef, ...]:
     return tuple(parse_cte(cte) for cte in ast.find_all(exp.CTE))
 
 
+# Possible repairs for parsed sql files.
+# Every repair is line-preserving: it adds or removes characters only at the
+# end of an existing line, or appends whole lines at EOF.
+_TRAILING_CLAUSE = r"FROM|LEFT|RIGHT|INNER|FULL|CROSS|JOIN|WHERE|GROUP|ORDER|HAVING|LIMIT|QUALIFY|WINDOW|UNION"
+
+# `a.` — a column reference whose name has not been typed yet.
+_DANGLING_DOT = re.compile(r"\.(?=[ \t]*$)", re.M)
+# `SELECT` with its list still empty, the next clause already below it.
+_EMPTY_SELECT = re.compile(
+    rf"(?im)^([ \t]*SELECT)[ \t]*$(?=\n[ \t]*(?:{_TRAILING_CLAUSE}|\)))"
+)
+# `a.id,` with the next item not written yet.
+_TRAILING_COMMA = re.compile(
+    rf"(?i),(?=[ \t]*\n[ \t]*(?:{_TRAILING_CLAUSE}|\)))",
+)
+
+
+def repaired_variants(source: str) -> Iterator[str]:
+    """Parseable rewrites of a mid-edit document, most faithful first.
+
+    Lazy so that a document which already parses costs nothing: the caller
+    stops at the first candidate that parses.
+    """
+    repaired = _DANGLING_DOT.sub(f".{PLACEHOLDER_COLUMN}", source)
+    repaired = _TRAILING_COMMA.sub("", repaired)
+    repaired = _EMPTY_SELECT.sub(rf"\1 {PLACEHOLDER_COLUMN}", repaired)
+    if repaired != source:
+        yield repaired
+    # A WITH whose final SELECT has not been written yet: every CTE-only
+    # document is a parse error until the body arrives, which is most of the
+    # time spent writing one.
+    yield f"{repaired}\nSELECT {PLACEHOLDER_COLUMN}"
+
+
 @dataclass(frozen=True)
 class ParsedDocument:
     """A successful parse, kept together with the text it was parsed from."""
@@ -300,18 +353,20 @@ class AstCache:
         self._documents: dict[str, ParsedDocument] = {}
 
     def refresh(self, uri: str, source: str) -> ParsedDocument | None:
-        """Re-parse `source`; on failure keep whatever was cached before."""
-        try:
-            ast = sqlglot.parse_one(source, read=dbt_dialect(self.dialect))
-        except (
-            Exception
-        ) as exc:  # noqa: BLE001 — sqlglot raises several unrelated types
-            log.debug("Parse failed for %s (%s); keeping previous AST", uri, exc)
-            return self._documents.get(uri)
+        """Re-parse `source`, repairing it if need be; on failure keep the cache."""
+        for candidate in chain((source,), repaired_variants(source)):
+            try:
+                ast = sqlglot.parse_one(candidate, read=dbt_dialect(self.dialect))
+            except (
+                Exception
+            ):  # noqa: BLE001 — sqlglot raises several unrelated types
+                continue
+            parsed = ParsedDocument(source=candidate, ast=ast)
+            self._documents[uri] = parsed
+            return parsed
 
-        parsed = ParsedDocument(source=source, ast=ast)
-        self._documents[uri] = parsed
-        return parsed
+        log.debug("Parse failed for %s even repaired; keeping previous AST", uri)
+        return self._documents.get(uri)
 
     def get(self, uri: str) -> ParsedDocument | None:
         return self._documents.get(uri)
