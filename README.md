@@ -1,6 +1,6 @@
 # DBT-Language-Server
 
-<img alt="DBT Language Server" src="https://vhs.charm.sh/vhs-1IEY4fW47S53ZaFfI9ri8B.gif" />
+<img alt="DBT Language Server" src="https://vhs.charm.sh/vhs-Tcmu3EkCB3f83K6U4W6fB.gif" />
 
 ## Features
 
