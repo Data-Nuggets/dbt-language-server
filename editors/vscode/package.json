@@ -2,7 +2,7 @@
   "name": "dbt-ls",
   "displayName": "dbt Language Server",
   "description": "Database-aware dbt LSP: ref/source completion and go-to-definition.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "Datanuggets",
   "license": "MIT",
   "repository": {
@@ -10,7 +10,7 @@
     "url": "https://github.com/Data-Nuggets/dbt-language-server"
   },
   "engines": {
-    "vscode": "^1.75.0"
+    "vscode": "^1.82.0"
   },
   "categories": [
     "Programming Languages"
