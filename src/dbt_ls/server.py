@@ -5,8 +5,8 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from uuid import uuid4
 
-from botocore.exceptions import LoginRefreshRequired
 from lsprotocol import types
 from pygls.lsp.server import LanguageServer
 from pygls.uris import to_fs_path
@@ -197,9 +197,9 @@ def _load_project(root_path: str | None, settings: Settings) -> ProjectState:
             )
             # Surfaced by load_project as a "missing dependency" progress message.
             raise
-        except LoginRefreshRequired as e:
+        except AWSLoginRequiredError:
             log.error("AWS login required")
-            raise AWSLoginRequiredError from e
+            raise
         except Exception:  # noqa: BLE001 — enrichment must never crash initialize
             log.exception("%s enrichment failed; continuing without it", source.value)
         else:
@@ -250,12 +250,39 @@ def load_project(ls: DbtLanguageServer):
         ls.work_done_progress.end(token, types.WorkDoneProgressEnd(message="Finished"))
 
 
+@server.feature(types.WORKSPACE_DID_CHANGE_WATCHED_FILES)
+def run_results(ls: DbtLanguageServer, params: types.DidChangeWatchedFilesParams):
+    for change in params.changes:
+        change_path = to_fs_path(change.uri)
+        if change_path and change_path.endswith("run_results.json"):
+            log.info(f"{change.type}: {to_fs_path(change.uri)}")
+            if ls.state:
+                ls.state.refresh_from_run_results(change_path)
+
+
 @server.feature(types.INITIALIZED)
 def on_initialized(ls: DbtLanguageServer, params: types.InitializedParams):
     # Discovery runs on the `initialized` notification, not the `initialize`
     # request: the client only services server-initiated requests (e.g.
     # window/workDoneProgress/create) once the handshake has completed.
     load_project(ls)
+    ls.client_register_capability(
+        params=types.RegistrationParams(
+            [
+                types.Registration(
+                    id=str(uuid4()),
+                    method=types.WORKSPACE_DID_CHANGE_WATCHED_FILES,
+                    register_options=types.DidChangeWatchedFilesRegistrationOptions(
+                        watchers=[
+                            types.FileSystemWatcher(
+                                glob_pattern="**/target/run_results.json",
+                            )
+                        ]
+                    ),
+                )
+            ]
+        )
+    )
 
 
 @server.command("dbt-ls.reload")

@@ -84,12 +84,12 @@ def span_to_range(text: str, span: Span) -> Range:
 BLOCK_TYPES = (exp.Select, exp.CTE, exp.Subquery)
 
 
-def query_blocks(ast: exp.Expression) -> list[exp.Expr]:
+def query_blocks(ast: exp.Expr) -> list[exp.Expr]:
     """Every query block in the tree, outermost and nested alike."""
     return list(ast.find_all(*BLOCK_TYPES))
 
 
-def block_span(node: exp.Expression) -> Span | None:
+def block_span(node: exp.Expr) -> Span | None:
     """Span of a query block, minus the WITH clause of a top-level SELECT.
 
     `WITH a AS (...) SELECT ...` parses as one Select that carries the CTEs,
@@ -202,6 +202,7 @@ class QueryRef:
     ref_type: Literal["from", "join"]
     alias: str = field(default_factory=str)
     columns: list[QueryColumn] = field(default_factory=list)
+    is_cte: bool = False
 
 
 @dataclass
@@ -223,6 +224,7 @@ class CTERef:
             if (c.alias or c.name) != PLACEHOLDER_COLUMN
         )
 
+
 @dataclass
 class ModelRef:
     name: str
@@ -237,9 +239,8 @@ class ModelRef:
             if (c.alias or c.name) != PLACEHOLDER_COLUMN
         )
 
-def table_ref(
-    node: exp.Expr, ref_type: Literal["from", "join"]
-) -> QueryRef | None:
+
+def table_ref(node: exp.Expr, ref_type: Literal["from", "join"]) -> QueryRef | None:
     """QueryRef for a relation in FROM/JOIN. None for anything but a plain table.
 
     A jinja table parses as an Identifier holding the raw `{{ ... }}` body, so
@@ -295,7 +296,71 @@ def parse_cte(cte: exp.CTE) -> CTERef:
     return cte_ref
 
 
-def parse_ctes(ast: exp.Expression) -> tuple[CTERef, ...]:
+def parse_ast(ast: exp.Expr, name: str = "") -> ModelRef:
+    model_ref = ModelRef(name=name)
+    if not isinstance(ast, exp.Select):
+        # Only a SELECT carries a column list. Anything else — an INSERT from a
+        # run result, or the bare identifier a half-typed buffer parses to —
+        # has no model shape to describe, and `.selects` is not there to read.
+        return model_ref
+
+    select = ast
+    ctes = parse_ctes(ast)
+
+    # QueryRefs, in source order: FROM first, then each JOIN.
+    # sqlglot renamed the arg `from` -> `from_`; accept either.
+    from_clause = select.args.get("from_") or select.args.get("from")
+    if from_clause is not None:
+        if (ref := table_ref(from_clause.this, "from")) is not None:
+            cte = next(
+                (c for c in ctes if c.name.casefold() == ref.table.casefold()), None
+            )
+            # cte is not None -> the FROM points at a CTE, not a model/source
+            ref.is_cte = bool(cte)
+            model_ref.tables.append(ref)
+    for join in select.args.get("joins") or []:
+        if (ref := table_ref(join.this, "join")) is not None:
+            cte = next(
+                (c for c in ctes if c.name.casefold() == ref.table.casefold()), None
+            )
+            # cte is not None -> the FROM points at a CTE, not a model/source
+            ref.is_cte = bool(cte)
+            model_ref.tables.append(ref)
+
+    # A table with no alias is qualified by its own name instead.
+    by_alias = {t.alias or t.table: t for t in model_ref.tables}
+    # An unqualified column is only attributable when there is one candidate.
+    sole_table = model_ref.tables[0] if len(model_ref.tables) == 1 else None
+
+    for col in select.selects:
+        inner = col.unalias()
+        out = col.alias_or_name
+        if isinstance(inner, exp.Column):
+            tbl, name = inner.table or None, inner.name
+            owner = by_alias.get(tbl) if tbl else sole_table
+        elif isinstance(inner, exp.Star):
+            # A bare `*` is every column of every relation in scope, so it is
+            # only attributable when there is exactly one to attribute it to.
+            tbl, name, owner = None, out, sole_table
+        else:
+            # Computed selects — literals, calls, CASE — trace back to no
+            # single upstream column, so they are exposed but attributed to
+            # no table.
+            tbl, name, owner = None, out, None
+
+        column = QueryColumn(name=name, ref_alias=tbl, alias=out)
+
+        model_ref.selects.append(column)
+        # The same object, so anything that resolves a type through `tables`
+        # is visible to consumers reading `selects`.
+        if owner is not None:
+            owner.columns.append(column)
+
+    return model_ref
+
+# TODO: concolidate the two methods above
+
+def parse_ctes(ast: exp.Expr) -> tuple[CTERef, ...]:
     return tuple(parse_cte(cte) for cte in ast.find_all(exp.CTE))
 
 
@@ -338,7 +403,7 @@ class ParsedDocument:
     """A successful parse, kept together with the text it was parsed from."""
 
     source: str
-    ast: exp.Expression
+    ast: exp.Expr
 
     @cached_property
     def ctes(self) -> tuple[CTERef, ...]:
@@ -357,9 +422,7 @@ class AstCache:
         for candidate in chain((source,), repaired_variants(source)):
             try:
                 ast = sqlglot.parse_one(candidate, read=dbt_dialect(self.dialect))
-            except (
-                Exception
-            ):  # noqa: BLE001 — sqlglot raises several unrelated types
+            except Exception:  # noqa: BLE001 — sqlglot raises several unrelated types
                 continue
             parsed = ParsedDocument(source=candidate, ast=ast)
             self._documents[uri] = parsed

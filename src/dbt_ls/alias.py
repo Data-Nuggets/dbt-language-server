@@ -104,7 +104,7 @@ def parse_alias_list(text: str) -> list[Alias]:
 
 
 def find_block_range(
-    blocks: list[exp.Expression], cur_pos: Position, sql: str
+    blocks: list[exp.Expr], cur_pos: Position, sql: str
 ) -> Range | None:
     """The region the cursor is in: this block's start up to the next one's.
 
@@ -138,7 +138,7 @@ def choose_alias(
     cur_pos: Position,
     aliases: list[Alias],
     alias: str,
-    blocks: list[exp.Expression],
+    blocks: list[exp.Expr],
     sql: str,
 ) -> Alias | None:
     """Pick the declaration of `alias` that is in scope at `cur_pos`.

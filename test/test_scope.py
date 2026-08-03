@@ -39,7 +39,7 @@ def resolve(parsed, text: str, pos: tuple[int, int], alias: str):
 
 # The buffer at the moment the second CTE's select list is being typed: the
 # final SELECT does not exist yet, and `a` is bound in both CTEs.
-MID_EDIT = '''WITH cards AS (
+MID_EDIT = """WITH cards AS (
     SELECT
         a.card_id AS id,
         a.mana_cost
@@ -52,7 +52,7 @@ artists AS (
     FROM {{ ref("int_artists") }} a
     LEFT JOIN {{ source("src", "oracle_cards") }} oc
     ON a.id = oc.cardmarket_id
-)'''
+)"""
 
 
 @pytest.mark.parametrize(

@@ -1,7 +1,8 @@
 import json
 import logging
 import os
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
+from functools import wraps
 from pathlib import Path
 from typing import Callable
 
@@ -12,6 +13,7 @@ from ibis.expr.schema import Schema
 from ibis.expr.types.relations import Table
 
 from dbt_ls.column import Column, HasColumns
+from dbt_ls.exceptions import AWSLoginRequiredError
 from dbt_ls.profiles import (
     AthenaTarget,
     DatabaseTarget,
@@ -24,7 +26,7 @@ from dbt_ls.profiles import (
     SparkTarget,
 )
 from dbt_ls.project import Project
-from dbt_ls.source import IGNORED_DIRS, SourceTable, discover_sources
+from dbt_ls.source import IGNORED_DIRS, SourceTable
 
 log = logging.getLogger("dbt_ls")
 
@@ -266,6 +268,26 @@ def get_databricks_models(
     return _get_databricks_schema(models, w, profile_target)
 
 
+def translates_aws_login_errors(fn):
+    """Re-raise botocore's expired-login error as the dbt-ls one.
+       Fixes ImportError when not using aws backend
+    """
+
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            from botocore.exceptions import LoginRefreshRequired
+        except ImportError:
+            return fn(*args, **kwargs)
+        try:
+            return fn(*args, **kwargs)
+        except LoginRefreshRequired as exc:
+            raise AWSLoginRequiredError from exc
+
+    return wrapper
+
+
+@translates_aws_login_errors
 def get_athena_models(
     models: list[Model], profile_target: AthenaTarget, project_root: str | Path
 ) -> tuple[list[Model], list[SourceTable]]:
@@ -304,6 +326,7 @@ def get_athena_models(
     )
 
 
+@translates_aws_login_errors
 def get_glue_models(
     models: list[Model], profile_target: GlueTarget, project_root: str | Path
 ) -> tuple[list[Model], list[SourceTable]]:

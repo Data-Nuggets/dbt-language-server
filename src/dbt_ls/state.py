@@ -1,7 +1,11 @@
+import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
+import sqlglot
+
+from dbt_ls.column import Column
 from dbt_ls.model import (
     Model,
     SourcedList,
@@ -13,6 +17,8 @@ from dbt_ls.model import (
 )
 from dbt_ls.profiles import ProfileTarget
 from dbt_ls.project import Project
+from dbt_ls.resolve import compiled_relation_lookup, resolve_cte
+from dbt_ls.scope import dbt_dialect, parse_ast, parse_ctes
 from dbt_ls.source import SourceTable, discover_sources, enrich_sources_from_catalog
 
 log = logging.getLogger("dbt_ls")
@@ -70,6 +76,38 @@ class ProjectState:
             )
             self.sources = documented_sources
 
+    def refresh_from_run_results(self, result_path: str):
+
+        rr = RunResults.from_fs_path(result_path)
+        models: list[Model] = []
+
+        for res in rr.results:
+            if res.status != "success" or not (res.compiled_code or "").strip():
+                continue
+            ast = sqlglot.parse_one(res.compiled_code, read=dbt_dialect("postgres"))
+
+            resolved = []
+            for cte in parse_ctes(ast):
+                lookup = compiled_relation_lookup(self.models, self.sources, resolved)
+                resolved.append(resolve_cte(cte, lookup))
+
+            lookup = compiled_relation_lookup(self.models, self.sources, resolved)
+            mr = resolve_cte(parse_ast(ast, res.unique_id.split(".")[-1]), lookup)
+
+            if result_model := Model(
+                name=mr.name,
+                path=Path("<run-result>"),
+                columns=tuple(
+                    Column(name=c.name, data_type=c.data_type) for c in mr.columns
+                ),
+            ):
+                models.append(result_model)
+
+            log.info([(c.name, c.data_type) for c in mr.columns])
+
+        if models:
+            self.reconciliate_models(models)
+
     def reconciliate_models(self, models: list[Model]):
         """
         Compares two lists of models and find duplicates.
@@ -92,3 +130,51 @@ class ProjectState:
                 by_name[model.name] = model
 
         self.models = SourcedList(by_name.values(), source="reconciliate_models")
+
+
+@dataclass
+class RunResult:
+    status: str
+    relation_name: str
+    compiled_code: str
+    unique_id: str = ""
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "RunResult":
+        kwargs = {}
+        allowed_fields = {f.name for f in fields(cls)}
+
+        for k, v in data.items():
+            if k in allowed_fields:
+                kwargs[k] = v
+
+        return cls(**kwargs)
+
+    @property
+    def model_name(self) -> str:
+        return self.relation_name.split(".")[-1]
+
+
+@dataclass
+class RunResults:
+    metadata: dict
+    elapsed_time: str
+    args: dict
+    results: list[RunResult] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "RunResults":
+        kwargs = {}
+        for k, v in data.items():
+            if k == "results":
+                kwargs[k] = [RunResult.from_dict(res) for res in v]
+            else:
+                kwargs[k] = v
+
+        return cls(**kwargs)
+
+    @classmethod
+    def from_fs_path(cls, path: str) -> "RunResults":
+        with open(path, "r") as f:
+            data = json.load(f)
+            return cls.from_dict(data)
