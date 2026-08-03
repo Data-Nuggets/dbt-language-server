@@ -13,3 +13,4 @@ wheels/
 
 logs/
 .env
+local/

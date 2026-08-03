@@ -22,7 +22,7 @@ models:
 
 sources:
   - name: src
-    database: dev
+    database: "{{ none if target.type in ['mysql', 'spark'] else 'dev' }}"
     schema: main
     tables:
       - name: my_source_table
