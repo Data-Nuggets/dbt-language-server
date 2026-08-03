@@ -38,6 +38,16 @@ If `dbt-ls` is not on your PATH (e.g. it lives in a project venv), set
 }
 ```
 
+## Multiple dbt projects in one workspace
+
+A workspace may contain any number of dbt projects (`project/dbt_project1`,
+`project/dbt_project2`, …). The extension starts one server per
+`dbt_project.yml`, lazily, the first time you open a SQL file belonging to it —
+so each file gets completions from its own project. Each server logs to its own
+`dbt-ls (<project>)` output channel.
+
+SQL files that are not inside a dbt project do not start a server.
+
 ## Settings
 
 | Setting                | Default    | Description                                  |
