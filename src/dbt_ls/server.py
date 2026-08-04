@@ -10,6 +10,7 @@ from uuid import uuid4
 from lsprotocol import types
 from pygls.lsp.server import LanguageServer
 from pygls.uris import to_fs_path
+from pygls.workspace import TextDocument
 
 from dbt_ls import __version__
 from dbt_ls.alias import Alias, choose_alias, parse_alias_list
@@ -368,20 +369,17 @@ def columns_for(
     return ()
 
 
-@server.feature(
-    types.TEXT_DOCUMENT_COMPLETION,
-    types.CompletionOptions(trigger_characters=["'", '"', "(", ".", " "]),
-)
-def completions(ls: DbtLanguageServer, params: types.CompletionParams):
-    if ls.state is None:
-        return None
-    models = ls.state.models
-    sources = ls.state.sources
-    dbt_root = ls.state.dbt_root
+def serve_completions(
+    state: ProjectState,
+    document: TextDocument,
+    ast_cache: AstCache,
+    pos: types.Position,
+):
+    models = state.models
+    sources = state.sources
+    dbt_root = state.dbt_root
 
-    document = ls.workspace.get_text_document(params.text_document.uri)
-    current_line = document.lines[params.position.line].strip()
-    pos = params.position
+    current_line = document.lines[pos.line].strip()
     line = document.lines[pos.line] if pos.line < len(document.lines) else ""
     line_prefix = line[: pos.character]
 
@@ -434,9 +432,9 @@ def completions(ls: DbtLanguageServer, params: types.CompletionParams):
         alias = info["alias"]
         # Alias.line_number is 1-based, LSP Position.line is 0-based.
         cursor = (pos.line + 1, pos.character)
-        parsed = ls.ast_cache.get(params.text_document.uri)
+        parsed = ast_cache.get(document.uri)
         if parsed is None:
-            log.debug("COLUMN path: no usable AST for %s", params.text_document.uri)
+            log.debug("COLUMN path: no usable AST for %s", document.uri)
             return []
         # Block spans are offsets into `parsed.source`, so they have to be
         # resolved against that text rather than the live buffer.
@@ -474,9 +472,9 @@ def completions(ls: DbtLanguageServer, params: types.CompletionParams):
             for c in columns
         ]
     elif kind == "cte":
-        parsed = ls.ast_cache.get(params.text_document.uri)
+        parsed = ast_cache.get(document.uri)
         if parsed is None:
-            log.debug("CTE path: no usable AST for %s", params.text_document.uri)
+            log.debug("CTE path: no usable AST for %s", document.uri)
             return []
         ctes = parsed.ctes
         log.info(
@@ -496,6 +494,22 @@ def completions(ls: DbtLanguageServer, params: types.CompletionParams):
     else:
         log.debug("no pattern matched for %r", current_line)
         return []
+
+
+@server.feature(
+    types.TEXT_DOCUMENT_COMPLETION,
+    types.CompletionOptions(trigger_characters=["'", '"', "(", ".", " "]),
+)
+def completions(ls: DbtLanguageServer, params: types.CompletionParams):
+    document = ls.workspace.get_text_document(params.text_document.uri)
+
+    if ls.state:
+        return serve_completions(
+            state=ls.state,
+            document=document,
+            ast_cache=ls.ast_cache,
+            pos=params.position,
+        )
 
 
 @server.feature(types.TEXT_DOCUMENT_DEFINITION)

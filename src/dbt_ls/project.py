@@ -20,3 +20,6 @@ class Project:
     @property
     def profile(self) -> str:
         return self.config.get("profile", "")
+
+    def __repr__(self) -> str:
+        return f"DBT Project at {self.root}"

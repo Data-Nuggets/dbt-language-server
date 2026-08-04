@@ -217,6 +217,9 @@ class Profiles:
         self.path = path
         self.config: dict[str, Any] = yaml.safe_load(self.path.read_text()) or {}
 
+    def __repr__(self) -> str:
+        return f"DBT Profile at {self.path}"
+
     @classmethod
     def locate(cls, project_root: str) -> "Profiles | None":
         candidate = cls._search_dirs(project_root)

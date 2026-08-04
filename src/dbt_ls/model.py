@@ -270,7 +270,7 @@ def get_databricks_models(
 
 def translates_aws_login_errors(fn):
     """Re-raise botocore's expired-login error as the dbt-ls one.
-       Fixes ImportError when not using aws backend
+    Fixes ImportError when not using aws backend
     """
 
     @wraps(fn)

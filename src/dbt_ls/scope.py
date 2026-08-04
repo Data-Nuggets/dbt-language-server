@@ -358,7 +358,9 @@ def parse_ast(ast: exp.Expr, name: str = "") -> ModelRef:
 
     return model_ref
 
+
 # TODO: concolidate the two methods above
+
 
 def parse_ctes(ast: exp.Expr) -> tuple[CTERef, ...]:
     return tuple(parse_cte(cte) for cte in ast.find_all(exp.CTE))
