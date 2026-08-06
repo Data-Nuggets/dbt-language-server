@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass, replace
 from functools import wraps
 from pathlib import Path
@@ -23,6 +24,7 @@ from dbt_ls.profiles import (
     MSSQLTarget,
     MySQLTarget,
     ProfileTarget,
+    RedshiftTarget,
     SparkTarget,
 )
 from dbt_ls.project import Project
@@ -364,6 +366,94 @@ def get_glue_models(
     )
 
 
+_REDSHIFT_COLUMNS_SQL = """
+    select table_schema, table_name, column_name, data_type
+    from svv_columns
+    where table_schema not in ('pg_catalog', 'information_schema', 'pg_internal')
+    order by table_schema, table_name, ordinal_position
+"""
+
+
+def _redshift_rows(profile_target: RedshiftTarget, sql: str) -> list[list]:
+    import boto3
+
+    session = boto3.Session(
+        profile_name=profile_target.iam_profile or "default",
+        region_name=profile_target.region,
+    )
+    client = session.client("redshift-data")
+    name = profile_target.host.split(".", 1)[0]
+    target = (
+        {"WorkgroupName": name}
+        if "redshift-serverless" in profile_target.host
+        else {"ClusterIdentifier": name, "DbUser": profile_target.user}
+    )
+
+    sid = client.execute_statement(Database=profile_target.database, Sql=sql, **target)[
+        "Id"
+    ]
+
+    # Back off so a slow statement doesn't get throttled by its own polling.
+    # Cap at a minute
+    interval = 0.1
+    while (desc := client.describe_statement(Id=sid))["Status"] != "FINISHED":
+        if desc["Status"] in ("FAILED", "ABORTED"):
+            raise RuntimeError(f"redshift {desc['Status']}: {desc.get('Error', '')}")
+        time.sleep(interval)
+        interval = min(interval * 2, 60.0)
+
+    return [
+        [None if c.get("isNull") else next(iter(c.values()), None) for c in record]
+        for page in client.get_paginator("get_statement_result").paginate(Id=sid)
+        for record in page["Records"]
+    ]
+
+
+@translates_aws_login_errors
+def get_redshift_models(
+    models: list[Model], profile_target: RedshiftTarget, project_root: str | Path
+) -> tuple[list[Model], list[SourceTable]]:
+    rows = _redshift_rows(profile_target, _REDSHIFT_COLUMNS_SQL)
+
+    by_relation: dict[tuple[str, str], list[Column]] = {}
+    for schema, table, column, data_type in rows:
+        by_relation.setdefault((schema, table), []).append(
+            Column(name=column, data_type=data_type)
+        )
+
+    # Models are looked up by bare table name, so collapse the schema out —
+    # sorting the target schema first makes it win any name collision.
+    schema_by_name: dict[str, str] = {}
+    columns_by_name: dict[str, tuple[Column, ...]] = {}
+    for (schema, table), columns in sorted(
+        by_relation.items(), key=lambda kv: kv[0][0] != profile_target.schema
+    ):
+        schema_by_name.setdefault(table, schema)
+        columns_by_name.setdefault(table, tuple(columns))
+
+    leftover_sources = columns_by_name.keys() - [m.name for m in models]
+
+    return (
+        SourcedList(
+            [
+                Model(name=m.name, path=m.path, columns=columns_by_name.get(m.name, ()))
+                for m in models
+            ],
+            source="enrich_models_from_database",
+        ),
+        [
+            SourceTable(
+                name=s,
+                source_name="<unknown>",
+                database=profile_target.database,
+                schema=schema_by_name.get(s),
+                columns=columns_by_name.get(s, ()),
+            )
+            for s in leftover_sources
+        ],
+    )
+
+
 _DATABASE_METHOD_REGISTRY: dict[
     str,
     Callable[..., tuple[list[Model], list[SourceTable]]],
@@ -376,6 +466,7 @@ _DATABASE_METHOD_REGISTRY: dict[
     "databricks": get_databricks_models,
     "athena": get_athena_models,
     "glue": get_glue_models,
+    "redshift": get_redshift_models,
 }
 
 
