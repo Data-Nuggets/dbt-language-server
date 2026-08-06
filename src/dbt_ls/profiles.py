@@ -200,6 +200,18 @@ class GlueTarget(ProfileTarget):
     aws_profile_name: str | None = None
 
 
+@dataclass(kw_only=True)
+class RedshiftTarget(ProfileTarget):
+    port: int
+    database: str
+    schema: str
+    method: str
+    host: str
+    user: str
+    iam_profile: str = "default"
+    region: str
+
+
 _TARGET_REGISTRY: dict[str, type[ProfileTarget]] = {
     "duckdb": DuckDBTarget,
     "postgres": DatabaseTarget,
@@ -209,6 +221,7 @@ _TARGET_REGISTRY: dict[str, type[ProfileTarget]] = {
     "databricks": DatabricksTarget,
     "athena": AthenaTarget,
     "glue": GlueTarget,
+    "redshift": RedshiftTarget,
 }
 
 
