@@ -33,6 +33,59 @@ from dbt_ls.source import IGNORED_DIRS, SourceTable
 log = logging.getLogger("dbt_ls")
 
 
+SYSTEM_SCHEMAS: dict[str, frozenset[str]] = {
+    "duckdb": frozenset({"information_schema", "pg_catalog"}),
+    "postgres": frozenset({"information_schema", "pg_catalog", "pg_toast", "meta"}),
+    "redshift": frozenset(
+        {
+            "information_schema",
+            "pg_catalog",
+            "pg_toast",
+            "pg_internal",
+            "pg_automv",
+            "catalog_history",
+        }
+    ),
+    "mysql": frozenset({"information_schema", "mysql", "performance_schema", "sys"}),
+    "sqlserver": frozenset(
+        {
+            "sys",
+            "information_schema",
+            "guest",
+            "db_owner",
+            "db_accessadmin",
+            "db_securityadmin",
+            "db_ddladmin",
+            "db_backupoperator",
+            "db_datareader",
+            "db_datawriter",
+            "db_denydatareader",
+            "db_denydatawriter",
+        }
+    ),
+    "spark": frozenset({"information_schema", "global_temp"}),
+    "databricks": frozenset(
+        {"information_schema", "global_temp", "__databricks_internal"}
+    ),
+    "athena": frozenset({"information_schema"}),
+    "glue": frozenset({"information_schema"}),
+}
+
+SYSTEM_SCHEMA_PREFIXES: dict[str, tuple[str, ...]] = {
+    "postgres": ("pg_temp", "pg_toast_temp"),
+    "redshift": ("pg_temp", "pg_toast_temp"),
+}
+
+
+def is_system_schema(adapter: str, schema: str | None) -> bool:
+    if not schema:
+        return False
+    name = schema.casefold()
+    if name in SYSTEM_SCHEMAS.get(adapter, frozenset()):
+        return True
+    return name.startswith(SYSTEM_SCHEMA_PREFIXES.get(adapter, ()))
+
+
 class SourcedList(list):
     def __init__(self, iterable=(), *, source: str):
         super().__init__(iterable)
@@ -154,10 +207,9 @@ def get_database_models(
         host=profile_target.host,
         port=profile_target.port,
         database=profile_target.dbname,
-        schema=profile_target.schema,
     )
 
-    return _get_database_schema(models, con)
+    return _get_database_schema(models, con, profile_target.type)
 
 
 def get_mysql_models(
@@ -236,14 +288,22 @@ def get_databricks_models(
 
         columns_by_name: dict[str, tuple[Column, ...]] = {}
 
-        tables = workspace.tables.list(
-            catalog_name=profile_target.catalog, schema_name=profile_target.schema
-        )
+        schemas = [
+            s.name
+            for s in workspace.schemas.list(profile_target.catalog)
+            if not is_system_schema(profile_target.type, s.name)
+        ]
+        for db_schema in schemas:
 
-        for t in tables:
-            columns_by_name[t.name] = tuple(
-                Column(name=c.name, data_type=c.type_text) for c in (t.columns or [])
+            tables = workspace.tables.list(
+                catalog_name=profile_target.catalog, schema_name=db_schema
             )
+
+            for t in tables:
+                columns_by_name[t.name] = tuple(
+                    Column(name=c.name, data_type=c.type_text)
+                    for c in (t.columns or [])
+                )
 
         leftover_sources = columns_by_name.keys() - [m.name for m in models]
 
@@ -300,14 +360,24 @@ def get_athena_models(
     session = boto3.Session(profile_name=profile_target.aws_profile_name or "default")
     client = session.client("athena")
 
-    tables = client.list_table_metadata(
-        CatalogName=profile_target.database, DatabaseName=profile_target.schema
-    )
+    schemas = [
+        s["Name"]
+        for s in client.list_databases(CatalogName=profile_target.database)[
+            "DatabaseList"
+        ]
+        if not is_system_schema(profile_target.type, s["Name"])
+    ]
 
-    for t in tables["TableMetadataList"]:
-        columns_by_name[t["Name"]] = tuple(
-            Column(name=c["Name"], data_type=c["Type"]) for c in (t["Columns"] or [])
+    for db_schema in schemas:
+        tables = client.list_table_metadata(
+            CatalogName=profile_target.database, DatabaseName=db_schema
         )
+
+        for t in tables["TableMetadataList"]:
+            columns_by_name[t["Name"]] = tuple(
+                Column(name=c["Name"], data_type=c["Type"])
+                for c in (t["Columns"] or [])
+            )
 
     leftover_sources = columns_by_name.keys() - [m.name for m in models]
 
@@ -339,13 +409,20 @@ def get_glue_models(
     session = boto3.Session(profile_name=profile_target.aws_profile_name or "default")
     client = session.client("glue")
 
-    tables = client.get_tables(DatabaseName=profile_target.schema)
+    schemas = [
+        s["Name"]
+        for s in client.get_databases()["DatabaseList"]
+        if not is_system_schema(profile_target.type, s["Name"])
+    ]
 
-    for t in tables["TableList"]:
-        columns_by_name[t["Name"]] = tuple(
-            Column(name=c["Name"], data_type=c["Type"])
-            for c in (t["StorageDescriptor"]["Columns"] or [])
-        )
+    for db_schema in schemas:
+        tables = client.get_tables(DatabaseName=db_schema)
+
+        for t in tables["TableList"]:
+            columns_by_name[t["Name"]] = tuple(
+                Column(name=c["Name"], data_type=c["Type"])
+                for c in (t["StorageDescriptor"]["Columns"] or [])
+            )
 
     leftover_sources = columns_by_name.keys() - [m.name for m in models]
 
@@ -369,9 +446,13 @@ def get_glue_models(
 _REDSHIFT_COLUMNS_SQL = """
     select table_schema, table_name, column_name, data_type
     from svv_columns
-    where table_schema not in ('pg_catalog', 'information_schema', 'pg_internal')
+    where table_schema not in ({system_schemas})
+      and table_schema not like 'pg\\_temp%'
+      and table_schema not like 'pg\\_toast\\_temp%'
     order by table_schema, table_name, ordinal_position
-"""
+""".format(
+    system_schemas=", ".join(f"'{s}'" for s in sorted(SYSTEM_SCHEMAS["redshift"]))
+)
 
 
 def _redshift_rows(profile_target: RedshiftTarget, sql: str) -> list[list]:
@@ -471,19 +552,23 @@ _DATABASE_METHOD_REGISTRY: dict[
 
 
 def _get_database_schema(
-    models: list[Model], con: BaseBackend
+    models: list[Model], con: BaseBackend, backend_type: str
 ) -> tuple[list[Model], list[SourceTable]]:
 
     columns_by_name: dict[str, tuple[Column, ...]] = {}
 
-    tables = con.list_tables()
-    for t in tables:
-        table: Table = con.table(t)
-        schema: Schema = table.schema()
+    schemas = [s for s in con.list_databases() if not is_system_schema(backend_type, s)]
 
-        columns_by_name[t] = tuple(
-            Column(name=name, data_type=str(dtype)) for name, dtype in schema.items()
-        )
+    for db_schema in schemas:
+        tables = con.list_tables(database=db_schema)
+        for t in tables:
+            table: Table = con.table(t, database=db_schema)
+            schema: Schema = table.schema()
+
+            columns_by_name[t] = tuple(
+                Column(name=name, data_type=str(dtype))
+                for name, dtype in schema.items()
+            )
 
     leftover_sources = columns_by_name.keys() - [m.name for m in models]
 
