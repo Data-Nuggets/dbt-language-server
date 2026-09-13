@@ -1,5 +1,6 @@
 import pytest
 
+from dbt_ls.exceptions import ProfileTargetError
 from dbt_ls.profiles import (
     AthenaTarget,
     DatabaseTarget,
@@ -209,3 +210,75 @@ from dbt_ls.profiles import (
 )
 def test_target_from_dict(target_dict, expected):
     assert ProfileTarget.from_dict(target_dict) == expected
+
+
+def test_missing_required_field_raises_profile_target_error():
+    with pytest.raises(ProfileTargetError) as exc_info:
+        ProfileTarget.from_dict(
+            {"type": "postgres", "user": "postgres", "host": "127.0.0.1"}
+        )
+
+    message = str(exc_info.value)
+    assert "'postgres' profile target is missing required field(s)" in message
+    for field in ("dbname", "password", "port", "schema"):
+        assert field in message
+
+
+def test_misspelled_key_is_suggested_for_the_field_it_leaves_missing():
+    with pytest.raises(ProfileTargetError) as exc_info:
+        ProfileTarget.from_dict(
+            {
+                "type": "postgres",
+                "user": "postgres",
+                "password": "passwd",
+                "host": "127.0.0.1",
+                "port": 5432,
+                "schema": "dev",
+                "database": "mydb",  # postgres targets spell this `dbname`
+            }
+        )
+
+    assert "'database' (did you mean 'dbname'?)" in str(exc_info.value)
+
+
+def test_unknown_keys_are_ignored_when_nothing_is_missing():
+    target = ProfileTarget.from_dict(
+        {
+            "type": "duckdb",
+            "path": "dev.duckdb",
+            "sslmode": "require",  # not modelled; must not fail the parse
+        }
+    )
+
+    assert target == DuckDBTarget(type="duckdb", threads=1, path="dev.duckdb")
+
+
+def test_uncoercible_field_raises_profile_target_error():
+    with pytest.raises(ProfileTargetError):
+        ProfileTarget.from_dict(
+            {
+                "type": "postgres",
+                "user": "postgres",
+                "password": "passwd",
+                "host": "127.0.0.1",
+                "port": "not-a-port",
+                "schema": "dev",
+                "dbname": "mydb",
+            }
+        )
+
+
+def test_databricks_token_and_oauth_mix_raises_profile_target_error():
+    with pytest.raises(ProfileTargetError):
+        ProfileTarget.from_dict(
+            {
+                "type": "databricks",
+                "catalog": "main",
+                "schema": "dev",
+                "host": "adb.example.net",
+                "http_path": "/sql/1.0/endpoints/abc",
+                "token": "tok",
+                "client_id": "cid",
+                "client_secret": "csec",
+            }
+        )

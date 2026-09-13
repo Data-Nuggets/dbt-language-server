@@ -5,11 +5,8 @@ from pathlib import Path
 import yaml
 
 from dbt_ls.column import Column, HasColumns
+from dbt_ls import IGNORED_DIRS
 
-# Directories to skip when walking a project tree: build artifacts, installed
-# packages and VCS metadata — notably `.venv`, which ships its own bundled
-# dbt_project.yml files inside the dbt package.
-IGNORED_DIRS = {"target", ".venv", "venv", ".git", "dbt_packages", "node_modules"}
 
 
 @dataclass(frozen=True)

@@ -1,5 +1,7 @@
+import difflib
+import logging
 import os
-from dataclasses import dataclass, fields
+from dataclasses import MISSING, dataclass, fields
 from pathlib import Path
 from types import UnionType
 from typing import Any, Union, get_args, get_origin, get_type_hints
@@ -7,7 +9,9 @@ from typing import Any, Union, get_args, get_origin, get_type_hints
 import yaml
 from jinja2.sandbox import SandboxedEnvironment
 
-from dbt_ls.exceptions import EnvVarError
+from dbt_ls.exceptions import EnvVarError, ProfileTargetError
+
+log = logging.getLogger("dbt_ls")
 
 
 class Secret:
@@ -95,21 +99,73 @@ class ProfileTarget:
         allowed = {f.name for f in fields(target_cls)}
 
         kwargs = {}
+        unknown = []
         for k, v in data.items():
             if k not in allowed:
+                # dbt accepts plenty of connection keys we do not model
+                # (`sslmode`, `retries`, ...), so an unrecognised key is not an
+                # error on its own — it is only kept around to explain a
+                # missing required field below.
+                unknown.append(k)
                 continue
             rendered = render_profile_value(_env, v)
             try:
                 kwargs[k] = _coerce(rendered, hints.get(k, str))
             except (ValueError, TypeError) as exc:
-                raise ValueError(f"profile field {k!r}: {exc}") from exc
+                raise ProfileTargetError(f"profile field {k!r}: {exc}") from exc
+
+        if unknown:
+            log.debug(
+                "Ignoring unrecognised profile key(s) for target type %r: %s",
+                data.get("type", ""),
+                ", ".join(sorted(unknown)),
+            )
+
+        required = {
+            f.name
+            for f in fields(target_cls)
+            if f.default is MISSING and f.default_factory is MISSING
+        }
+        if missing := sorted(required - kwargs.keys()):
+            raise ProfileTargetError(
+                cls._missing_fields_message(data, missing, unknown)
+            )
 
         SECRET_FIELDS = {"password", "token", "client_secret", "aws_secret_access_key"}
         for name in SECRET_FIELDS:
             if isinstance(kwargs.get(name), str):
                 kwargs[name] = Secret(kwargs[name])
 
-        return target_cls(**kwargs)
+        try:
+            return target_cls(**kwargs)
+        except (TypeError, ValueError) as exc:
+            # e.g. `DatabricksTarget.__post_init__` rejecting a token/OAuth mix.
+            raise ProfileTargetError(
+                f"invalid {data.get('type', '')!r} profile target: {exc}"
+            ) from exc
+
+    @staticmethod
+    def _missing_fields_message(
+        data: dict, missing: list[str], unknown: list[str]
+    ) -> str:
+        message = (
+            f"{data.get('type', '')!r} profile target is missing required "
+            f"field(s): {', '.join(missing)}"
+        )
+        hints = []
+        for key in sorted(unknown):
+            # Cross-adapter spellings (`database` vs `dbname`) are too far apart
+            # for difflib at any cutoff that does not also match unrelated
+            # fields, so they are listed explicitly; difflib then covers plain
+            # typos (`databse`, `passwd`).
+            candidates = [f for f in missing if key in _FIELD_ALIASES.get(f, ())]
+            if not candidates:
+                candidates = difflib.get_close_matches(key, missing, n=1)
+            if candidates:
+                hints.append(f"{key!r} (did you mean {candidates[0]!r}?)")
+        if hints:
+            message += f". Unrecognised key(s) in profiles.yml: {', '.join(hints)}"
+        return message
 
 
 @dataclass(kw_only=True)
@@ -210,6 +266,20 @@ class RedshiftTarget(ProfileTarget):
     user: str
     iam_profile: str = "default"
     region: str
+
+
+_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "dbname": ("database", "db", "catalog"),
+    "database": ("dbname", "db", "catalog"),
+    "server": ("host", "hostname"),
+    "host": ("server", "hostname"),
+    "schema": ("dataset",),
+    "user": ("username", "uid"),
+    "password": ("pass", "pwd"),
+    "http_path": ("httppath",),
+    "region": ("region_name",),
+    "region_name": ("region",),
+}
 
 
 _TARGET_REGISTRY: dict[str, type[ProfileTarget]] = {

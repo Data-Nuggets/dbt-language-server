@@ -18,6 +18,10 @@ class Project:
         return self.config.get("model-paths", [])
 
     @property
+    def seed_paths(self) -> list[str]:
+        return self.config.get("seed-paths", [])
+
+    @property
     def profile(self) -> str:
         return self.config.get("profile", "")
 

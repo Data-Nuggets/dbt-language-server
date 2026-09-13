@@ -137,6 +137,9 @@ def _load_project(root_path: str | None, settings: Settings) -> ProjectState:
     except EnvVarError as e:
         log.error("Environment variable not set for profile %r", project.profile)
         raise NoDbtProfileTargetError from e
+    except ProfileTargetError:
+        log.exception("Could not build a target for profile %r", project.profile)
+        raise
     except KeyError as e:
         log.error(
             "Profile %r has no matching profile/target %s in profiles.yml",
@@ -237,6 +240,12 @@ def load_project(ls: DbtLanguageServer):
         ls.work_done_progress.end(
             token, types.WorkDoneProgressEnd(message="❌Target empty")
         )
+        return
+    except ProfileTargetError as e:
+        ls.work_done_progress.end(
+            token, types.WorkDoneProgressEnd(message=f"❌{e}")
+        )
+        return
     except ImportError:
         ls.work_done_progress.end(
             token, types.WorkDoneProgressEnd(message="❌Missing dependency (see logs)")

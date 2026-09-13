@@ -28,7 +28,9 @@ from dbt_ls.profiles import (
     SparkTarget,
 )
 from dbt_ls.project import Project
-from dbt_ls.source import IGNORED_DIRS, SourceTable
+from dbt_ls.source import SourceTable
+from dbt_ls import IGNORED_DIRS
+
 
 log = logging.getLogger("dbt_ls")
 

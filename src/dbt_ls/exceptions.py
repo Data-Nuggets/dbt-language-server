@@ -24,3 +24,7 @@ class EnvVarError(DbtLsError):
 
 class AWSLoginRequiredError(DbtLsError):
     pass
+
+
+class ProfileTargetError(DbtLsError):
+    pass
