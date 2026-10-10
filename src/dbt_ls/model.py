@@ -196,7 +196,7 @@ def get_duckdb_models(
     )
     con = ibis.duckdb.connect(connection_path)
 
-    return _get_database_schema(models, con)
+    return _get_database_schema(models, con, profile_target.type)
 
 
 def get_database_models(
@@ -226,7 +226,7 @@ def get_mysql_models(
         database=profile_target.schema,
     )
 
-    return _get_database_schema(models, con)
+    return _get_database_schema(models, con, profile_target.type)
 
 
 def get_mssql_models(
@@ -243,7 +243,7 @@ def get_mssql_models(
         TrustServerCertificate="yes" if not profile_target.encrypt else "no",
     )
 
-    return _get_database_schema(models, con)
+    return _get_database_schema(models, con, profile_target.type)
 
 
 def get_spark_models(
@@ -257,7 +257,7 @@ def get_spark_models(
 
     con = ibis.pyspark.connect(session=spark)
 
-    return _get_database_schema(models, con)
+    return _get_database_schema(models, con, profile_target.type)
 
 
 def get_databricks_models(
