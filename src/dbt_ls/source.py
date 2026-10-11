@@ -1,5 +1,5 @@
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import yaml
@@ -16,6 +16,8 @@ class SourceTable(HasColumns):
     database: str | None = None
     schema: str | None = None
     columns: tuple[Column, ...] = ()
+    # The table's real name in the warehouse, when it differs from `name`.
+    identifier: str | None = None
 
 
 def discover_sources(root: str) -> list:
@@ -47,6 +49,7 @@ def discover_sources(root: str) -> list:
                                 for c in table.get("columns", [])
                             ]
                         ),
+                        identifier=table.get("identifier"),
                     )
                 )
     return sources
@@ -70,11 +73,8 @@ def enrich_sources_from_catalog(
             Column(name=c["name"], data_type=c.get("type"))
             for c in source.get("columns", {}).values()
         )
+    # `replace`, not a new SourceTable: where the source lives must survive,
+    # it is what the warehouse lookup goes by.
     return [
-        SourceTable(
-            name=s.name,
-            source_name=s.source_name,
-            columns=columns_by_name.get(s.name) or s.columns,
-        )
-        for s in sources
+        replace(s, columns=columns_by_name.get(s.name) or s.columns) for s in sources
     ]

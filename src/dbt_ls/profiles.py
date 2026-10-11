@@ -171,6 +171,7 @@ class ProfileTarget:
 @dataclass(kw_only=True)
 class DuckDBTarget(ProfileTarget):
     path: str
+    schema: str = "main"
 
 
 @dataclass(kw_only=True)

@@ -1,11 +1,12 @@
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, replace
 from functools import wraps
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
 import ibis
 import yaml
@@ -107,12 +108,22 @@ class SourcedList(list):
         return super().__getitem__(key)
 
 
+LOCATION_FIELDS = ("alias", "schema", "database")
+
+
 @dataclass(frozen=True)
 class Model(HasColumns):
     name: str
     path: Path
     columns: tuple[Column, ...] = ()
     model_type: str = ""
+    # Where the project says the model is built, when it says so with a
+    # literal: `alias` replaces the table name, `schema` is dbt's *custom*
+    # schema (by default appended to the target's), `database` replaces the
+    # target's. None means "not declared", not "the default".
+    alias: str | None = None
+    schema: str | None = None
+    database: str | None = None
 
     def __repr__(self) -> str:
         return f"Model: {self.name}, Path: {self.path}, Model type: {self.model_type}"
@@ -136,11 +147,148 @@ class Model(HasColumns):
 
         Keeps this model's identity (name/path) but adopts `other`'s columns
         when `other` has any — so a richer source (config/catalog/db) fills in
-        column info without clobbering the real file path.
+        column info without clobbering the real file path. A declared
+        location is adopted the same way, field by field.
         """
-        if not other.columns:
-            return self
-        return replace(self, columns=other.columns)
+        updates = {
+            field: value
+            for field in LOCATION_FIELDS
+            if (value := getattr(other, field)) is not None
+        }
+        if other.columns:
+            updates["columns"] = other.columns
+        return replace(self, **updates) if updates else self
+
+
+@dataclass(frozen=True)
+class WarehouseTable(HasColumns):
+    """A table or view as the warehouse reports it, with where it lives.
+
+    The name alone does not identify a table: `analytics.stg_cards` and
+    `dev_someone.stg_cards` are two tables. `database` is the level above the
+    schema — a catalog on Databricks and Athena — and is None for readers
+    that only ever see one.
+    """
+
+    name: str
+    schema: str | None = None
+    database: str | None = None
+    columns: tuple[Column, ...] = ()
+
+
+def _declared(value) -> str | None:
+    """A literal from a YAML file, or None when it is jinja we cannot render."""
+    if not isinstance(value, str) or "{{" in value or "{%" in value:
+        return None
+    return value or None
+
+
+def _declared_location(config: dict) -> dict[str, str]:
+    """The literal `alias` / `schema` / `database` entries of a config mapping."""
+    return {
+        field: value
+        for field in LOCATION_FIELDS
+        if (value := _declared(config.get(field))) is not None
+    }
+
+
+_JINJA_COMMENT = re.compile(r"\{#.*?#\}", re.S)
+_CONFIG_CALL = re.compile(r"\bconfig\s*\(")
+# A location argument whose value is one plain string and nothing else:
+# `alias='fct_orders'`, with the string already swapped for a numbered marker
+# by `_top_level`. A value that is built up (`'fct_' ~ suffix`) or looked up
+# (`var('x')`) is not followed directly by the end of the argument, and does
+# not match.
+_LOCATION_ARGUMENT = re.compile(
+    r"\b(alias|schema|database)\s*=\s*\x00(\d+)\x00\s*(?=[,)])"
+)
+
+
+def _top_level(arguments: str) -> tuple[str, list[str]]:
+    """`arguments` with everything that is not a top-level keyword hidden.
+
+    Top-level strings become `\\x00<n>\\x00` markers indexing the returned
+    list; whatever sits inside brackets is blanked. So `meta={'alias': ..}`
+    and `post_hook="... schema='x' ..."` cannot be mistaken for arguments.
+    """
+    out, strings, depth, i = [], [], 0, 0
+    while i < len(arguments):
+        ch = arguments[i]
+        if ch in "'\"":
+            end = i + 1
+            while end < len(arguments) and arguments[end] != ch:
+                end += 2 if arguments[end] == "\\" else 1
+            if depth == 0:
+                out.append(f"\x00{len(strings)}\x00")
+                strings.append(arguments[i + 1 : end])
+            i = end + 1
+            continue
+        if ch in "([{":
+            depth += 1
+            out.append(" ")
+        elif ch in ")]}":
+            depth -= 1
+            # Below zero is the call's own closing parenthesis.
+            out.append(")" if depth < 0 else " ")
+        else:
+            out.append(ch if depth == 0 else " ")
+        i += 1
+    return "".join(out), strings
+
+
+def _config_arguments(text: str) -> Iterator[str]:
+    """The argument text of each `config(...)` call, parentheses matched."""
+    for call in _CONFIG_CALL.finditer(text):
+        depth, quote, i = 1, "", call.end()
+        while i < len(text) and depth:
+            ch = text[i]
+            if quote:
+                if ch == "\\":
+                    i += 1
+                elif ch == quote:
+                    quote = ""
+            elif ch in "'\"":
+                quote = ch
+            elif ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            i += 1
+        if depth == 0:
+            yield text[call.end() : i]
+
+
+def inline_location(sql: str) -> dict[str, str]:
+    """Location a model file declares for itself in `{{ config(...) }}`.
+
+    A text search, not a parse: this runs over every model file at load.
+    """
+    if "config" not in sql or not any(field in sql for field in LOCATION_FIELDS):
+        return {}
+    found: dict[str, str] = {}
+    for arguments in _config_arguments(_JINJA_COMMENT.sub("", sql)):
+        visible, strings = _top_level(arguments)
+        for match in _LOCATION_ARGUMENT.finditer(visible):
+            if (value := _declared(strings[int(match.group(2))])) is not None:
+                found[match.group(1)] = value
+    return found
+
+
+def read_inline_locations(models: list[Model]) -> list[Model]:
+    """The models whose own file declares where they are built.
+
+    Takes precedence over a YAML properties file, as it does in dbt.
+    """
+    located = []
+    for model in models:
+        try:
+            sql = Path(model.path).read_text()
+        except (OSError, UnicodeDecodeError, ValueError):
+            # Models known only from YAML or a run result have no file.
+            continue
+        if location := inline_location(sql):
+            located.append(replace(model, columns=(), **location))
+    return SourcedList(located, source="read_inline_locations")
 
 
 def discover_models(root: str, model_paths: list[str]) -> list[Model]:
@@ -184,9 +332,9 @@ def enrich_models_from_catalog(models: list[Model], catalog_path: Path) -> list[
     )
 
 
-def get_duckdb_models(
-    models: list[Model], profile_target: DuckDBTarget, project_root: str | Path
-) -> tuple[list[Model], list[SourceTable]]:
+def read_duckdb_tables(
+    profile_target: DuckDBTarget, project_root: str | Path
+) -> list[WarehouseTable]:
     ibis.set_backend("duckdb")
 
     connection_path = (
@@ -196,12 +344,12 @@ def get_duckdb_models(
     )
     con = ibis.duckdb.connect(connection_path)
 
-    return _get_database_schema(models, con, profile_target.type)
+    return _ibis_tables(con, profile_target.type)
 
 
-def get_database_models(
-    models: list[Model], profile_target: DatabaseTarget, project_root: str | Path
-) -> tuple[list[Model], list[SourceTable]]:
+def read_postgres_tables(
+    profile_target: DatabaseTarget, project_root: str | Path
+) -> list[WarehouseTable]:
 
     con = ibis.postgres.connect(
         user=profile_target.user,
@@ -211,12 +359,12 @@ def get_database_models(
         database=profile_target.dbname,
     )
 
-    return _get_database_schema(models, con, profile_target.type)
+    return _ibis_tables(con, profile_target.type)
 
 
-def get_mysql_models(
-    models: list[Model], profile_target: MySQLTarget, project_root: str | Path
-) -> tuple[list[Model], list[SourceTable]]:
+def read_mysql_tables(
+    profile_target: MySQLTarget, project_root: str | Path
+) -> list[WarehouseTable]:
 
     con = ibis.mysql.connect(
         user=profile_target.user,
@@ -226,12 +374,12 @@ def get_mysql_models(
         database=profile_target.schema,
     )
 
-    return _get_database_schema(models, con, profile_target.type)
+    return _ibis_tables(con, profile_target.type)
 
 
-def get_mssql_models(
-    models: list[Model], profile_target: MSSQLTarget, project_root: str | Path
-) -> tuple[list[Model], list[SourceTable]]:
+def read_sqlserver_tables(
+    profile_target: MSSQLTarget, project_root: str | Path
+) -> list[WarehouseTable]:
     con = ibis.mssql.connect(
         user=profile_target.user,
         password=profile_target.password.reveal(),
@@ -243,12 +391,12 @@ def get_mssql_models(
         TrustServerCertificate="yes" if not profile_target.encrypt else "no",
     )
 
-    return _get_database_schema(models, con, profile_target.type)
+    return _ibis_tables(con, profile_target.type)
 
 
-def get_spark_models(
-    models: list[Model], profile_target: SparkTarget, project_root: str | Path
-) -> tuple[list[Model], list[SourceTable]]:
+def read_spark_tables(
+    profile_target: SparkTarget, project_root: str | Path
+) -> list[WarehouseTable]:
     from pyspark.sql import SparkSession
 
     spark = (
@@ -257,79 +405,62 @@ def get_spark_models(
 
     con = ibis.pyspark.connect(session=spark)
 
-    return _get_database_schema(models, con, profile_target.type)
+    return _ibis_tables(con, profile_target.type)
 
 
-def get_databricks_models(
-    models: list[Model], profile_target: DatabricksTarget, project_root: str | Path
-) -> tuple[list[Model], list[SourceTable]]:
+# Each cloud reader is split in two: a `_*_client` that signs in, and a
+# `_*_tables` that takes the client as an argument. The second half holds all
+# the logic and can be run against a stand-in client, so it is testable
+# without an account.
 
+
+def _databricks_client(profile_target: DatabricksTarget):
     from databricks.sdk import WorkspaceClient
     from databricks.sdk.core import Config
 
     if profile_target.token:
-        w = WorkspaceClient(
+        return WorkspaceClient(
             host=profile_target.host,
             token=profile_target.token.reveal(),
             auth_type="pat",
         )
-    else:
-        w = WorkspaceClient(
-            config=Config(
-                host=profile_target.host,
-                client_id=profile_target.client_id,
-                client_secret=profile_target.client_secret.reveal(),
-            )
+    return WorkspaceClient(
+        config=Config(
+            host=profile_target.host,
+            client_id=profile_target.client_id,
+            client_secret=profile_target.client_secret.reveal(),
         )
+    )
 
-    def _get_databricks_schema(
-        models: list[Model],
-        workspace: WorkspaceClient,
-        profile_target: DatabricksTarget,
-    ) -> tuple[list[Model], list[SourceTable]]:
 
-        columns_by_name: dict[str, tuple[Column, ...]] = {}
-
-        schemas = [
-            s.name
-            for s in workspace.schemas.list(profile_target.catalog)
-            if not is_system_schema(profile_target.type, s.name)
-        ]
-        for db_schema in schemas:
-
-            tables = workspace.tables.list(
-                catalog_name=profile_target.catalog, schema_name=db_schema
-            )
-
-            for t in tables:
-                columns_by_name[t.name] = tuple(
-                    Column(name=c.name, data_type=c.type_text)
-                    for c in (t.columns or [])
-                )
-
-        leftover_sources = columns_by_name.keys() - [m.name for m in models]
-
-        return (
-            SourcedList(
-                [
-                    Model(
-                        name=m.name,
-                        path=m.path,
-                        columns=columns_by_name.get(m.name, ()),
-                    )
-                    for m in models
-                ],
-                source="enrich_models_from_database",
+def _databricks_tables(
+    workspace, profile_target: DatabricksTarget
+) -> list[WarehouseTable]:
+    """`workspace` is a databricks-sdk WorkspaceClient, or anything shaped like one."""
+    catalog = profile_target.catalog
+    schemas = [
+        s.name
+        for s in workspace.schemas.list(catalog)
+        if not is_system_schema(profile_target.type, s.name)
+    ]
+    return [
+        WarehouseTable(
+            name=t.name,
+            schema=db_schema,
+            database=catalog,
+            columns=tuple(
+                Column(name=c.name, data_type=c.type_text) for c in (t.columns or [])
             ),
-            [
-                SourceTable(
-                    name=s, source_name="<unknown>", columns=columns_by_name.get(s, ())
-                )
-                for s in leftover_sources
-            ],
         )
+        for db_schema in schemas
+        for t in workspace.tables.list(catalog_name=catalog, schema_name=db_schema)
+    ]
 
-    return _get_databricks_schema(models, w, profile_target)
+
+def read_databricks_tables(
+    profile_target: DatabricksTarget, project_root: str | Path
+) -> list[WarehouseTable]:
+    return _databricks_tables(_databricks_client(profile_target), profile_target)
 
 
 def translates_aws_login_errors(fn):
@@ -351,98 +482,88 @@ def translates_aws_login_errors(fn):
     return wrapper
 
 
-@translates_aws_login_errors
-def get_athena_models(
-    models: list[Model], profile_target: AthenaTarget, project_root: str | Path
-) -> tuple[list[Model], list[SourceTable]]:
+def _aws_session(profile_name: str | None):
     import boto3
 
-    columns_by_name: dict[str, tuple[Column, ...]] = {}
+    return boto3.Session(profile_name=profile_name or "default")
 
-    session = boto3.Session(profile_name=profile_target.aws_profile_name or "default")
-    client = session.client("athena")
 
+def _athena_tables(client, profile_target: AthenaTarget) -> list[WarehouseTable]:
+    """`client` is a boto3 Athena client."""
+    catalog = profile_target.database
+
+    # Both listings are paged, 50 entries at a time; a single call would
+    # silently stop there.
     schemas = [
         s["Name"]
-        for s in client.list_databases(CatalogName=profile_target.database)[
-            "DatabaseList"
-        ]
+        for page in client.get_paginator("list_databases").paginate(CatalogName=catalog)
+        for s in page["DatabaseList"]
         if not is_system_schema(profile_target.type, s["Name"])
     ]
 
+    tables: list[WarehouseTable] = []
     for db_schema in schemas:
-        tables = client.list_table_metadata(
-            CatalogName=profile_target.database, DatabaseName=db_schema
+        pages = client.get_paginator("list_table_metadata").paginate(
+            CatalogName=catalog, DatabaseName=db_schema
         )
-
-        for t in tables["TableMetadataList"]:
-            columns_by_name[t["Name"]] = tuple(
-                Column(name=c["Name"], data_type=c["Type"])
-                for c in (t["Columns"] or [])
-            )
-
-    leftover_sources = columns_by_name.keys() - [m.name for m in models]
-
-    return (
-        SourcedList(
-            [
-                Model(name=m.name, path=m.path, columns=columns_by_name.get(m.name, ()))
-                for m in models
-            ],
-            source="enrich_models_from_database",
-        ),
-        [
-            SourceTable(
-                name=s, source_name="<unknown>", columns=columns_by_name.get(s, ())
-            )
-            for s in leftover_sources
-        ],
-    )
+        for page in pages:
+            for t in page["TableMetadataList"]:
+                tables.append(
+                    WarehouseTable(
+                        name=t["Name"],
+                        schema=db_schema,
+                        database=catalog,
+                        columns=tuple(
+                            Column(name=c["Name"], data_type=c.get("Type"))
+                            for c in (t.get("Columns") or [])
+                        ),
+                    )
+                )
+    return tables
 
 
 @translates_aws_login_errors
-def get_glue_models(
-    models: list[Model], profile_target: GlueTarget, project_root: str | Path
-) -> tuple[list[Model], list[SourceTable]]:
-    import boto3
+def read_athena_tables(
+    profile_target: AthenaTarget, project_root: str | Path
+) -> list[WarehouseTable]:
+    client = _aws_session(profile_target.aws_profile_name).client("athena")
+    return _athena_tables(client, profile_target)
 
-    columns_by_name: dict[str, tuple[Column, ...]] = {}
 
-    session = boto3.Session(profile_name=profile_target.aws_profile_name or "default")
-    client = session.client("glue")
-
+def _glue_tables(client, profile_target: GlueTarget) -> list[WarehouseTable]:
+    """`client` is a boto3 Glue client."""
     schemas = [
         s["Name"]
-        for s in client.get_databases()["DatabaseList"]
+        for page in client.get_paginator("get_databases").paginate()
+        for s in page["DatabaseList"]
         if not is_system_schema(profile_target.type, s["Name"])
     ]
 
+    tables: list[WarehouseTable] = []
     for db_schema in schemas:
-        tables = client.get_tables(DatabaseName=db_schema)
+        for page in client.get_paginator("get_tables").paginate(DatabaseName=db_schema):
+            for t in page["TableList"]:
+                # Not every catalog entry has a storage descriptor.
+                storage = t.get("StorageDescriptor") or {}
+                tables.append(
+                    WarehouseTable(
+                        name=t["Name"],
+                        schema=db_schema,
+                        columns=tuple(
+                            Column(name=c["Name"], data_type=c.get("Type"))
+                            for c in (storage.get("Columns") or [])
+                        ),
+                    )
+                )
+    return tables
 
-        for t in tables["TableList"]:
-            columns_by_name[t["Name"]] = tuple(
-                Column(name=c["Name"], data_type=c["Type"])
-                for c in (t["StorageDescriptor"]["Columns"] or [])
-            )
 
-    leftover_sources = columns_by_name.keys() - [m.name for m in models]
-
-    return (
-        SourcedList(
-            [
-                Model(name=m.name, path=m.path, columns=columns_by_name.get(m.name, ()))
-                for m in models
-            ],
-            source="enrich_models_from_database",
-        ),
-        [
-            SourceTable(
-                name=s, source_name="<unknown>", columns=columns_by_name.get(s, ())
-            )
-            for s in leftover_sources
-        ],
-    )
+@translates_aws_login_errors
+def read_glue_tables(
+    profile_target: GlueTarget, project_root: str | Path
+) -> list[WarehouseTable]:
+    client = _aws_session(profile_target.aws_profile_name).client("glue")
+    return _glue_tables(client, profile_target)
 
 
 _REDSHIFT_COLUMNS_SQL = """
@@ -457,14 +578,18 @@ _REDSHIFT_COLUMNS_SQL = """
 )
 
 
-def _redshift_rows(profile_target: RedshiftTarget, sql: str) -> list[list]:
+def _redshift_client(profile_target: RedshiftTarget):
     import boto3
 
     session = boto3.Session(
         profile_name=profile_target.iam_profile or "default",
         region_name=profile_target.region,
     )
-    client = session.client("redshift-data")
+    return session.client("redshift-data")
+
+
+def _redshift_rows(client, profile_target: RedshiftTarget, sql: str) -> list[list]:
+    """`client` is a boto3 Redshift Data API client."""
     name = profile_target.host.split(".", 1)[0]
     target = (
         {"WorkgroupName": name}
@@ -492,134 +617,222 @@ def _redshift_rows(profile_target: RedshiftTarget, sql: str) -> list[list]:
     ]
 
 
-@translates_aws_login_errors
-def get_redshift_models(
-    models: list[Model], profile_target: RedshiftTarget, project_root: str | Path
-) -> tuple[list[Model], list[SourceTable]]:
-    rows = _redshift_rows(profile_target, _REDSHIFT_COLUMNS_SQL)
+def _redshift_tables(client, profile_target: RedshiftTarget) -> list[WarehouseTable]:
+    rows = _redshift_rows(client, profile_target, _REDSHIFT_COLUMNS_SQL)
 
+    # The query orders by schema, table, ordinal position, and a dict keeps
+    # first-seen order, so both tables and their columns stay in that order.
     by_relation: dict[tuple[str, str], list[Column]] = {}
     for schema, table, column, data_type in rows:
         by_relation.setdefault((schema, table), []).append(
             Column(name=column, data_type=data_type)
         )
 
-    # Models are looked up by bare table name, so collapse the schema out —
-    # sorting the target schema first makes it win any name collision.
-    schema_by_name: dict[str, str] = {}
-    columns_by_name: dict[str, tuple[Column, ...]] = {}
-    for (schema, table), columns in sorted(
-        by_relation.items(), key=lambda kv: kv[0][0] != profile_target.schema
-    ):
-        schema_by_name.setdefault(table, schema)
-        columns_by_name.setdefault(table, tuple(columns))
-
-    leftover_sources = columns_by_name.keys() - [m.name for m in models]
-
-    return (
-        SourcedList(
-            [
-                Model(name=m.name, path=m.path, columns=columns_by_name.get(m.name, ()))
-                for m in models
-            ],
-            source="enrich_models_from_database",
-        ),
-        [
-            SourceTable(
-                name=s,
-                source_name="<unknown>",
-                database=profile_target.database,
-                schema=schema_by_name.get(s),
-                columns=columns_by_name.get(s, ()),
-            )
-            for s in leftover_sources
-        ],
-    )
+    return [
+        WarehouseTable(
+            name=table,
+            schema=schema,
+            database=profile_target.database,
+            columns=tuple(columns),
+        )
+        for (schema, table), columns in by_relation.items()
+    ]
 
 
-_DATABASE_METHOD_REGISTRY: dict[
-    str,
-    Callable[..., tuple[list[Model], list[SourceTable]]],
-] = {
-    "duckdb": get_duckdb_models,
-    "postgres": get_database_models,
-    "mysql": get_mysql_models,
-    "sqlserver": get_mssql_models,
-    "spark": get_spark_models,
-    "databricks": get_databricks_models,
-    "athena": get_athena_models,
-    "glue": get_glue_models,
-    "redshift": get_redshift_models,
+@translates_aws_login_errors
+def read_redshift_tables(
+    profile_target: RedshiftTarget, project_root: str | Path
+) -> list[WarehouseTable]:
+    return _redshift_tables(_redshift_client(profile_target), profile_target)
+
+
+_DATABASE_METHOD_REGISTRY: dict[str, Callable[..., list[WarehouseTable]]] = {
+    "duckdb": read_duckdb_tables,
+    "postgres": read_postgres_tables,
+    "mysql": read_mysql_tables,
+    "sqlserver": read_sqlserver_tables,
+    "spark": read_spark_tables,
+    "databricks": read_databricks_tables,
+    "athena": read_athena_tables,
+    "glue": read_glue_tables,
+    "redshift": read_redshift_tables,
 }
 
 
-def _get_database_schema(
-    models: list[Model], con: BaseBackend, backend_type: str
-) -> tuple[list[Model], list[SourceTable]]:
-
-    columns_by_name: dict[str, tuple[Column, ...]] = {}
-
+def _ibis_tables(con: BaseBackend, backend_type: str) -> list[WarehouseTable]:
     schemas = [s for s in con.list_databases() if not is_system_schema(backend_type, s)]
 
+    tables: list[WarehouseTable] = []
     for db_schema in schemas:
-        tables = con.list_tables(database=db_schema)
-        for t in tables:
+        for t in con.list_tables(database=db_schema):
             table: Table = con.table(t, database=db_schema)
             schema: Schema = table.schema()
-
-            columns_by_name[t] = tuple(
-                Column(name=name, data_type=str(dtype))
-                for name, dtype in schema.items()
+            tables.append(
+                WarehouseTable(
+                    name=t,
+                    schema=db_schema,
+                    columns=tuple(
+                        Column(name=name, data_type=str(dtype))
+                        for name, dtype in schema.items()
+                    ),
+                )
             )
-
-    leftover_sources = columns_by_name.keys() - [m.name for m in models]
-
-    return (
-        SourcedList(
-            [
-                Model(name=m.name, path=m.path, columns=columns_by_name.get(m.name, ()))
-                for m in models
-            ],
-            source="enrich_models_from_database",
-        ),
-        [
-            SourceTable(
-                name=s, source_name="<unknown>", columns=columns_by_name.get(s, ())
-            )
-            for s in leftover_sources
-        ],
-    )
+    return tables
 
 
-def filter_documented_database_sources(
-    sources: list[SourceTable], database_sources: list[SourceTable]
-):
+def read_warehouse_tables(
+    profile_target: ProfileTarget, project_root: str | Path
+) -> list[WarehouseTable]:
+    """Every table the profile's warehouse reports, each with its schema.
 
-    by_name = {t.name: t for t in database_sources}
-
-    # Merged documented meaning that it is listed as a source and enriched with column information from data source
-    merged_documented_source = [
-        replace(by_name.pop(a.name), source_name=a.source_name)
-        for a in sources
-        if a.name in by_name
-    ]
-
-    undocumented_sources = list(by_name.values())
-
-    return merged_documented_source, undocumented_sources
-
-
-def enrich_models_from_database(
-    models: list[Model],
-    profile_target: (
-        DuckDBTarget | DatabaseTarget | MSSQLTarget | MySQLTarget | ProfileTarget
-    ),
-    project_root: str | Path,
-) -> tuple[list[Model], list[SourceTable]]:
+    Empty when there is no reader for the profile's type.
+    """
     fn = _DATABASE_METHOD_REGISTRY.get(profile_target.type)
     if fn is None:
-        return ([], [])
-    return fn(models, profile_target, project_root)
+        return []
+    return fn(profile_target, project_root)
+
+
+# ---------------------------------------------------------------------------
+# Matching what the warehouse has to what the project declares.
+#
+# All comparisons are case-insensitive: warehouses differ in how they fold
+# identifiers, and dbt projects in how they spell them.
+# ---------------------------------------------------------------------------
+
+
+def _same(a: str | None, b: str | None) -> bool:
+    return a is not None and b is not None and a.casefold() == b.casefold()
+
+
+def _differs(a: str | None, b: str | None) -> bool:
+    """Known on both sides and unequal. An unknown side never disqualifies."""
+    return a is not None and b is not None and a.casefold() != b.casefold()
+
+
+def _tables_by_name(tables: list[WarehouseTable]) -> dict[str, list[WarehouseTable]]:
+    by_name: dict[str, list[WarehouseTable]] = {}
+    for table in tables:
+        by_name.setdefault(table.name.casefold(), []).append(table)
+    return by_name
+
+
+def target_location(profile_target: ProfileTarget) -> tuple[str | None, str | None]:
+    """(database, schema) dbt builds into by default, as far as the profile says."""
+    database = next(
+        (
+            value
+            for key in ("catalog", "database", "dbname")
+            if (value := getattr(profile_target, key, None))
+        ),
+        None,
+    )
+    return database, getattr(profile_target, "schema", None)
+
+
+def find_model_table(
+    model: Model,
+    by_name: dict[str, list[WarehouseTable]],
+    database: str | None,
+    schema: str | None,
+) -> WarehouseTable | None:
+    """The warehouse table a model was built as, or None rather than a guess.
+
+    The table is named by the model's alias when it declares one, and sought
+    in the database it declares, otherwise the target's. Then, by schema:
+
+    1. With a declared custom schema: `<target schema>_<custom>`, dbt's
+       default, then `<custom>` on its own, which is what the common
+       override produces.
+    2. The target schema. Also right for a model with a custom schema in a
+       project that only applies custom schemas in production.
+    3. A schema named `<target schema>_<something>`, if there is exactly one:
+       a custom schema set somewhere this did not read, like dbt_project.yml.
+    4. The only table of that name anywhere.
+
+    Several same-named tables with nothing to choose between them match
+    nothing: showing another table's columns is worse than showing none.
+    """
+    name = model.alias or model.name
+    database = model.database or database
+    candidates = [
+        t
+        for t in by_name.get(name.casefold(), [])
+        if not _differs(t.database, database)
+    ]
+
+    def in_schema(wanted: str | None) -> WarehouseTable | None:
+        return next((t for t in candidates if _same(t.schema, wanted)), None)
+
+    if model.schema:
+        default = f"{schema}_{model.schema}" if schema else None
+        if (found := in_schema(default) or in_schema(model.schema)) is not None:
+            return found
+    if schema:
+        if (found := in_schema(schema)) is not None:
+            return found
+        prefix = schema.casefold() + "_"
+        custom = [
+            t for t in candidates if (t.schema or "").casefold().startswith(prefix)
+        ]
+        if custom:
+            return custom[0] if len(custom) == 1 else None
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def match_models(
+    models: list[Model], tables: list[WarehouseTable], profile_target: ProfileTarget
+) -> list[Model]:
+    """The models that were found in the warehouse, carrying its columns."""
+    by_name = _tables_by_name(tables)
+    database, schema = target_location(profile_target)
+    matched = []
+    for model in models:
+        table = find_model_table(model, by_name, database, schema)
+        if table is not None and table.columns:
+            matched.append(replace(model, columns=table.columns))
+    return SourcedList(matched, source="enrich_models_from_database")
+
+
+def find_source_table(
+    source: SourceTable, by_name: dict[str, list[WarehouseTable]]
+) -> WarehouseTable | None:
+    """The warehouse table a documented source points at.
+
+    A source says where it lives, so it is looked up there and nowhere else:
+    schema as declared (dbt's default is the source's own name), database too
+    when both sides know it. Only a schema written as jinja, which cannot be
+    evaluated here, falls back to a unique match by name.
+    """
+    database = _declared(source.database)
+    candidates = [
+        t
+        for t in by_name.get((source.identifier or source.name).casefold(), [])
+        if not _differs(t.database, database)
+    ]
+    if source.schema is not None and _declared(source.schema) is None:
+        return candidates[0] if len(candidates) == 1 else None
+    schema = source.schema or source.source_name
+    return next((t for t in candidates if _same(t.schema, schema)), None)
+
+
+def match_sources(
+    sources: list[SourceTable], tables: list[WarehouseTable]
+) -> list[SourceTable]:
+    """Every documented source, with warehouse columns where it was found.
+
+    A source the warehouse does not have is kept as it was: it is still
+    declared, still valid in `source()`, and may well exist in a database
+    this reader did not look at.
+    """
+    by_name = _tables_by_name(tables)
+    result = []
+    for source in sources:
+        table = find_source_table(source, by_name)
+        if table is not None and table.columns:
+            source = replace(source, columns=table.columns)
+        result.append(source)
+    return result
 
 
 def enrich_models_from_config(dbt_root: str) -> list[Model]:
@@ -632,9 +845,12 @@ def enrich_models_from_config(dbt_root: str) -> list[Model]:
             Model(
                 m["name"],
                 Path(""),
-                tuple(Column(c["name"]) for c in m["columns"]),
+                # Plenty of entries only carry a description or tests.
+                tuple(Column(c["name"]) for c in m.get("columns") or []),
+                **_declared_location(m.get("config") or {}),
             )
-            for m in config["models"]
+            for m in config["models"] or []
+            if isinstance(m, dict) and "name" in m
         ]
 
     models: list[Model] = []
