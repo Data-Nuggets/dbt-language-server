@@ -1,0 +1,24 @@
+<title>dbt-ls project map</title>
+<style>
+{{style}}</style>
+<div class="tabbar">
+  <div class="tabbar-in">
+    <a class="brand" href="#overview">dbt-ls <span>{{version}}</span></a>
+    <nav class="tabs" role="tablist" aria-label="Pages">{{tabs}}</nav>
+  </div>
+</div>
+
+<div class="shell">
+  <nav class="toc" aria-label="On this page">
+    <p class="toc-label">On this page</p>
+    <span id="toc-links"></span>
+  </nav>
+
+  <main>
+{{panels}}
+    <footer>Release {{version}}, built on {{date}}.<span data-internal> Rebuild with <code>uv run docs/build.py</code>. Written from a full read of the source at commit 37c78b6 and kept up to date since.</span></footer>
+  </main>
+</div>
+
+{{data}}<script>
+{{script}}</script>

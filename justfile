@@ -33,3 +33,11 @@ test-all:
     uv run pytest || status=$?
     DBT_LS_REQUIRE_CONTAINERS=1 uv run pytest -m containers || status=$?
     exit $status
+
+# build docs/index.html, the full page with the Findings and Tasks tabs
+docs:
+    uv run docs/build.py
+
+# build site/index.html, the page GitHub Pages serves
+docs-public:
+    uv run docs/build.py --public -o site/index.html

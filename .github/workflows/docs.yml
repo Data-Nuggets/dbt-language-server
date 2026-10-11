@@ -1,0 +1,50 @@
+name: Docs
+
+# Builds the public documentation page and serves it on GitHub Pages.
+# Needs Settings -> Pages -> Source set to "GitHub Actions", once.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - docs/**
+      - README.md
+      - pyproject.toml
+      - .github/workflows/docs.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# A newer push replaces a deploy that is still waiting, but never one in flight.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      # --public leaves out the Findings and Tasks tabs.
+      - name: Build the page
+        run: uv run docs/build.py --public -o site/index.html
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

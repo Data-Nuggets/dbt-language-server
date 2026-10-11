@@ -1,0 +1,79 @@
+    <header class="hero" id="top">
+      <span class="eyebrow">dbt-ls · project map</span>
+      <h1>What dbt-ls does, and where it stands</h1>
+      <p class="lede">A language server that gives dbt SQL files completion for models, sources, CTEs and typed columns. These pages explain how to use it, how the code works and what works on which platform.<span data-internal> The Findings and Tasks tabs cover what is still broken and what to do next.</span></p>
+      <div class="chips">
+        <span class="chip"><b>Release</b> 0.4.1</span>
+        <span class="chip" data-internal><b>Reviewed at</b> 0.3.8; updated for 0.4.1</span>
+        <span class="chip"><b>Source</b> about 3,900 lines, 17 modules</span>
+        <span class="chip"><b>Tests</b> 335 pass, plus 17 against real containers</span>
+        <span class="chip"><b>Live backends</b> 9</span>
+        <span class="chip"><b>Date</b> 11 October 2026</span>
+      </div>
+    </header>
+
+    <section id="does" data-toc="What it does">
+      <h2>What it does</h2>
+      <p>The server reads a dbt project from disk, optionally asks the warehouse what columns exist, and answers completion and go-to-definition requests from the editor. It never runs dbt and never renders jinja.</p>
+      <div class="window">
+        <div class="window-bar"><span class="dots"><i></i><i></i><i></i></span><span>models/int_cards.sql</span><button type="button" data-copy>Copy</button></div>
+        <pre class="hl"><code><span class="k">with</span><span class="w"> </span><span class="n">cards</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="k">select</span><span class="w"> </span><span class="k">c</span><span class="p">.</span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="k">c</span><span class="p">.</span><span class="n">mana_cost</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">cost</span>
+<span class="w">    </span><span class="k">from</span><span class="w"> </span><span class="cp">{{</span> <span class="nv">ref</span><span class="o">(</span><span class="s1">'stg_cards'</span><span class="o">)</span> <span class="cp">}}</span><span class="w"> </span><span class="k">c</span><span class="w">          </span><span class="c1">-- ref(' completes model names</span>
+<span class="p">),</span>
+<span class="k">sets</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="k">select</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">code</span><span class="p">,</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">released_at</span>
+<span class="w">    </span><span class="k">from</span><span class="w"> </span><span class="cp">{{</span> <span class="nv">source</span><span class="o">(</span><span class="s1">'raw'</span><span class="o">,</span> <span class="s1">'sets'</span><span class="o">)</span> <span class="cp">}}</span><span class="w"> </span><span class="n">s</span><span class="w">     </span><span class="c1">-- source(' completes sources</span>
+<span class="p">)</span>
+<span class="k">select</span>
+<span class="w">    </span><span class="n">cards</span><span class="p">.</span><span class="n">cost</span><span class="p">,</span><span class="w">                            </span><span class="c1">-- alias. completes typed columns</span>
+<span class="w">    </span><span class="k">sets</span><span class="p">.</span><span class="n">released_at</span>
+<span class="k">from</span><span class="w"> </span><span class="n">cards</span><span class="w">                                 </span><span class="c1">-- from/join completes CTE names</span>
+<span class="k">join</span><span class="w"> </span><span class="k">sets</span><span class="w"> </span><span class="k">on</span><span class="w"> </span><span class="k">sets</span><span class="p">.</span><span class="n">code</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cards</span><span class="p">.</span><span class="n">id</span></code></pre>
+      </div>
+      <div class="grid">
+        <div class="card ok"><span class="badge">Works</span><h3>Model names in <code>ref('</code></h3><p>Lists every <code>.sql</code> file under the project's model paths, with its path as detail.</p></div>
+        <div class="card ok"><span class="badge">Works</span><h3>Sources in <code>source('</code></h3><p>Lists source tables from the YAML files and inserts both arguments. In the second argument, lists the tables of that source. Warehouse tables with no YAML follow, marked <code>not in sources.yml</code>.</p></div>
+        <div class="card ok"><span class="badge">Works</span><h3>CTE names after <code>from</code> / <code>join</code></h3><p>Offers the CTEs declared in the current file, then warehouse tables as <code>schema.table</code>. After <code>from schema.</code> it lists that schema only.</p></div>
+        <div class="card warn"><span class="badge">Partly</span><h3>Columns after <code>alias.</code></h3><p>Resolves the alias to a model, source, CTE or plain <code>schema.table</code> in the current query block and lists its columns with data types. Still fails in a few cases<span data-internal>, listed under Findings</span>.</p></div>
+        <div class="card ok"><span class="badge">New in 0.4.1</span><h3>Tables nobody documented</h3><p>Every warehouse table that matches no model and no documented source is kept and offered in completion, with its columns. Nothing has to be written in YAML first.</p></div>
+        <div class="card ok"><span class="badge">New in 0.4.1</span><h3>Loads in the background</h3><p>Names complete as soon as the files are read. The warehouse is read in one statement per database on a separate thread, and live columns follow.</p></div>
+        <div class="card ok"><span class="badge">Works</span><h3>Go to definition</h3><p>Jumps from a <code>ref('model')</code> to the model's file. Not available for sources or columns.</p></div>
+        <div class="card warn"><span class="badge">Partly</span><h3>Refresh after <code>dbt run</code></h3><p>Watches <code>target/run_results.json</code> and re-derives column lists from the compiled SQL. Can replace typed columns with untyped ones.</p></div>
+        <div class="card ok"><span class="badge">Works</span><h3>Check without an editor</h3><p><code>dbt-ls check path/to/project</code> loads the project the way the server does and prints, per schema source, how many models got columns and types, how long it took, any error, and how many undocumented tables it found.</p></div>
+        <div class="card ok"><span class="badge">Works</span><h3>Two editor commands</h3><p><code>dbt-ls.reload</code> rebuilds everything. <code>dbt-ls.current_model</code> returns the project root and the model's selector path so an editor can run it.</p></div>
+        <div class="card ok"><span class="badge">Works</span><h3>Two editors</h3><p>Neovim through <code>vim.lsp.config</code>. A VS Code extension that starts one server per <code>dbt_project.yml</code> in the workspace.</p></div>
+      </div>
+      <p class="note">Not implemented: hover, diagnostics, seeds, snapshots, macros, rename, formatting.</p>
+    </section>
+
+    <section id="platforms" data-toc="Platforms">
+      <h2>What works on which platform</h2>
+      <p>Most of the server does not depend on the warehouse. Only one thing does: reading live column names and types from it. That split is the key to making testing less tedious.</p>
+      <div class="grid wide">
+        <div class="card ok"><span class="badge">Every dbt adapter</span><h3>No connection needed</h3><p>Model, source and CTE completion, go to definition, columns from YAML files, columns and types from <code>target/catalog.json</code>, and both commands. This includes Snowflake, BigQuery and Fabric.</p><p>No profile is needed for these.</p></div>
+        <div class="card warn"><span class="badge">Nine adapters</span><h3>Live columns from the warehouse</h3><p>One function per adapter in <code>model.py</code>. Each lists the tables of every non-system schema; a shared step then matches them to models and sources by schema, and keeps the rest as undocumented tables.</p><p>DuckDB has real load tests. Postgres, MySQL, SQL Server and Spark Connect are tested against containers. The four cloud readers are tested against stand-in clients only.</p></div>
+      </div>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th>Platform</th><th>Profile type</th><th>Parsed as</th><th>Live columns through</th><th>Sign-in it accepts</th><th>State on main</th></tr></thead>
+          <tbody>
+            <tr><td>DuckDB</td><td><code>duckdb</code></td><td>duckdb</td><td>One statement, local file</td><td>None needed</td><td><span class="badge b-ok">Works</span> covered by load tests</td></tr>
+            <tr><td>PostgreSQL</td><td><code>postgres</code></td><td>postgres</td><td>One statement on <code>pg_catalog</code></td><td>User and password</td><td><span class="badge b-ok">Works</span> container tests</td></tr>
+            <tr><td>MySQL</td><td><code>mysql</code></td><td>mysql</td><td>One statement on <code>information_schema</code></td><td>User and password, key must be <code>server</code></td><td><span class="badge b-ok">Works</span> container tests</td></tr>
+            <tr><td>SQL Server</td><td><code>sqlserver</code></td><td>tsql</td><td>One statement over ODBC</td><td>SQL login only, key must be <code>server</code></td><td><span class="badge b-ok">Works</span> container tests</td></tr>
+            <tr><td>Spark</td><td><code>spark</code></td><td>spark</td><td>Spark Connect session, one request per table</td><td>None</td><td><span class="badge b-ok">Works</span> container tests; needs <code>pyspark[connect]</code></td></tr>
+            <tr><td>Databricks</td><td><code>databricks</code></td><td>databricks</td><td>Databricks SDK, Unity Catalog lists</td><td>Access token, or service principal OAuth</td><td><span class="badge b-mute">Not run</span> stub-tested</td></tr>
+            <tr><td>Athena</td><td><code>athena</code></td><td>trino</td><td>boto3 Athena metadata</td><td>Named AWS profile or default</td><td><span class="badge b-mute">Not run</span> stub-tested, paging fixed</td></tr>
+            <tr><td>Glue</td><td><code>glue</code></td><td>trino</td><td>boto3 Glue catalog</td><td>Named AWS profile or default</td><td><span class="badge b-mute">Not run</span> stub-tested, paging fixed</td></tr>
+            <tr><td>Redshift</td><td><code>redshift</code></td><td>redshift</td><td>boto3 Redshift Data API, <code>svv_columns</code></td><td>IAM profile only, cluster or serverless</td><td><span class="badge b-mute">Not run</span> stub-tested; password profiles rejected</td></tr>
+            <tr><td>Snowflake</td><td><code>snowflake</code></td><td>snowflake</td><td>Nothing</td><td>Not applicable</td><td><span class="badge b-mute">No live columns</span></td></tr>
+            <tr><td>BigQuery</td><td><code>bigquery</code></td><td>bigquery</td><td>Nothing</td><td>Not applicable</td><td><span class="badge b-mute">No live columns</span></td></tr>
+            <tr><td>Fabric, Synapse</td><td><code>fabric</code>, <code>synapse</code></td><td>tsql</td><td>Nothing</td><td>Not applicable</td><td><span class="badge b-mute">No live columns</span></td></tr>
+            <tr><td>Trino</td><td><code>trino</code></td><td>trino</td><td>Nothing</td><td>Not applicable</td><td><span class="badge b-mute">No live columns</span></td></tr>
+            <tr><td>Anything else</td><td>any</td><td>postgres</td><td>Nothing</td><td>Not applicable</td><td><span class="badge b-mute">No live columns</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note">This describes main after 0.4.1. "Works" means the reader ran against a real instance in a test: DuckDB in the default run, the other four in the container tests. The cloud platforms have not been run against a real account in any test. Two fixes found by the container tests are not released yet: the Spark extra, and SQL Server types with their precision.<span data-internal> Which cloud platforms you verified by hand over the summer is not recorded anywhere in the repo, so I could not include it.</span></p>
+    </section>

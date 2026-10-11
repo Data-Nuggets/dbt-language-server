@@ -1,0 +1,20 @@
+    <header class="hero compact" id="tasks-top">
+      <span class="eyebrow">dbt-ls · task list</span>
+      <h1>What to do next</h1>
+      <p class="lede">The tasks from <code>todo.md</code>, in order. Tick them off as you go; your ticks are saved in this browser. Finding numbers such as F2 are explained under <a href="#findings">Findings</a>.</p>
+      <div class="bar" aria-hidden="true"><i id="total-bar"></i></div>
+      <p class="progress-text" id="total-text" aria-live="polite"></p>
+    </header>
+
+    <div class="controls">
+      <div class="seg" role="group" aria-label="Show">
+        <button type="button" data-filter="all" aria-pressed="true">All</button>
+        <button type="button" data-filter="open" aria-pressed="false">Open</button>
+        <button type="button" data-filter="done" aria-pressed="false">Done</button>
+      </div>
+      <input class="search" id="search" type="search" placeholder="Filter, e.g. F2 or model.py" aria-label="Filter tasks">
+      <button class="btn" type="button" id="expand">Expand all</button>
+      <button class="btn" type="button" id="export">Copy as todo.md</button>
+    </div>
+    <div id="groups"></div>
+    <p class="note">Ticks live in this browser only: use "Copy as todo.md" and paste over the file to keep them in the repo.</p>
