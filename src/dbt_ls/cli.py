@@ -28,7 +28,15 @@ def main():
     """
     print(banner, file=sys.stderr)
 
-    p = argparse.ArgumentParser()
+    p = argparse.ArgumentParser(
+        prog="dbt-ls",
+        description="Start the dbt language server (stdio unless --tcp is given).",
+        epilog="subcommands:\n"
+        "  check [path]  load a dbt project without an editor and report what "
+        "was found;\n"
+        "                see `dbt-ls check --help`",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     # stdio is the default transport; --stdio is accepted (as a no-op) because
     # LSP clients such as VS Code pass it to select the stdio transport.
     p.add_argument("--stdio", action="store_true")
