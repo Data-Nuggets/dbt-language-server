@@ -685,7 +685,17 @@ order by n.nspname, c.relname, a.attnum
 """,
     # `column_type` carries the length and precision, `data_type` does not.
     "mysql": _INFORMATION_SCHEMA_SQL.format(data_type="column_type", where=""),
-    "sqlserver": _INFORMATION_SCHEMA_SQL.format(data_type="data_type", where=""),
+    # `data_type` is the bare name; put the precision or length back.
+    "sqlserver": _INFORMATION_SCHEMA_SQL.format(
+        data_type="""data_type + case
+    when data_type in ('decimal', 'numeric')
+        then concat('(', numeric_precision, ',', numeric_scale, ')')
+    when character_maximum_length = -1 then '(max)'
+    when data_type like '%char' or data_type like '%binary'
+        then concat('(', character_maximum_length, ')')
+    else '' end""",
+        where="",
+    ),
 }
 
 
