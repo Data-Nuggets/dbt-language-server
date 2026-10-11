@@ -30,7 +30,7 @@ from dbt_ls.profiles import (
 )
 from dbt_ls.project import Project
 from dbt_ls.source import SourceTable
-from dbt_ls import IGNORED_DIRS
+from dbt_ls import IGNORED_DIRS, load_yaml
 
 
 log = logging.getLogger("dbt_ls")
@@ -659,7 +659,59 @@ _DATABASE_METHOD_REGISTRY: dict[str, Callable[..., list[WarehouseTable]]] = {
 }
 
 
-def _ibis_tables(con: BaseBackend, backend_type: str) -> list[WarehouseTable]:
+# One statement for a whole database. The alternative, asking ibis for each
+# table's schema, is a round trip and a type conversion per table: about a
+# hundred times slower on a warehouse with thousands of tables.
+_INFORMATION_SCHEMA_SQL = """
+select table_schema, table_name, column_name, {data_type}
+from information_schema.columns
+{where}
+order by table_schema, table_name, ordinal_position
+"""
+_ALL_COLUMNS_SQL: dict[str, str] = {
+    # An attached DuckDB file shows up as another catalog; stay in our own.
+    "duckdb": _INFORMATION_SCHEMA_SQL.format(
+        data_type="data_type", where="where table_catalog = current_database()"
+    ),
+    # The system catalog rather than information_schema: it has materialized
+    # views, and format_type() keeps lengths and precision (`numeric(18,2)`).
+    "postgres": """
+select n.nspname, c.relname, a.attname, format_type(a.atttypid, a.atttypmod)
+from pg_catalog.pg_attribute a
+join pg_catalog.pg_class c on c.oid = a.attrelid
+join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+where a.attnum > 0 and not a.attisdropped and c.relkind in ('r', 'p', 'v', 'm', 'f')
+order by n.nspname, c.relname, a.attnum
+""",
+    # `column_type` carries the length and precision, `data_type` does not.
+    "mysql": _INFORMATION_SCHEMA_SQL.format(data_type="column_type", where=""),
+    "sqlserver": _INFORMATION_SCHEMA_SQL.format(data_type="data_type", where=""),
+}
+
+
+def _tables_in_one_statement(con: BaseBackend, backend_type: str) -> list[WarehouseTable]:
+    cursor = con.raw_sql(_ALL_COLUMNS_SQL[backend_type])
+    try:
+        rows = cursor.fetchall()
+    finally:
+        # DuckDB hands back the connection itself, which must stay open.
+        if backend_type != "duckdb":
+            cursor.close()
+
+    # Rows arrive ordered, and a dict keeps first-seen order.
+    by_relation: dict[tuple[str, str], list[Column]] = {}
+    for schema, table, column, data_type in rows:
+        by_relation.setdefault((schema, table), []).append(
+            Column(name=column, data_type=str(data_type))
+        )
+    return [
+        WarehouseTable(name=table, schema=schema, columns=tuple(columns))
+        for (schema, table), columns in by_relation.items()
+        if not is_system_schema(backend_type, schema)
+    ]
+
+
+def _tables_one_by_one(con: BaseBackend, backend_type: str) -> list[WarehouseTable]:
     schemas = [s for s in con.list_databases() if not is_system_schema(backend_type, s)]
 
     tables: list[WarehouseTable] = []
@@ -678,6 +730,19 @@ def _ibis_tables(con: BaseBackend, backend_type: str) -> list[WarehouseTable]:
                 )
             )
     return tables
+
+
+def _ibis_tables(con: BaseBackend, backend_type: str) -> list[WarehouseTable]:
+    if backend_type in _ALL_COLUMNS_SQL:
+        try:
+            return _tables_in_one_statement(con, backend_type)
+        except Exception as exc:
+            log.warning(
+                "Reading all columns in one statement failed (%s); "
+                "falling back to one request per table",
+                exc,
+            )
+    return _tables_one_by_one(con, backend_type)
 
 
 def read_warehouse_tables(
@@ -868,7 +933,7 @@ def enrich_models_from_config(dbt_root: str) -> list[Model]:
     for cf in config_files:
         try:
             with open(cf) as f:
-                config = yaml.safe_load(f) or {}
+                config = load_yaml(f) or {}
         except (yaml.YAMLError, UnicodeDecodeError, OSError) as exc:
             log.warning("Skipping unreadable config file %s: %s", cf, exc)
             continue

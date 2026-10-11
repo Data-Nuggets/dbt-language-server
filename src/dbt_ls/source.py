@@ -5,7 +5,7 @@ from pathlib import Path
 import yaml
 
 from dbt_ls.column import Column, HasColumns
-from dbt_ls import IGNORED_DIRS
+from dbt_ls import IGNORED_DIRS, load_yaml
 
 
 
@@ -28,7 +28,7 @@ def discover_sources(root: str) -> list:
         if any(part.startswith(".") for part in p.relative_to(root).parts[:-1]):
             continue
         try:
-            doc = yaml.safe_load(p.read_text())
+            doc = load_yaml(p.read_text())
         except yaml.YAMLError:
             continue
 
