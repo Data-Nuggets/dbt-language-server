@@ -1,6 +1,6 @@
 [project]
 name = "dbt-ls"
-version = "0.3.8"
+version = "0.4.0"
 description = "Databse aware DBT Language Server"
 readme = "README.md"
 authors = [
@@ -40,6 +40,7 @@ aws = [
     "boto3>=1.43.46",
     "botocore[crt]>=1.43.46",
     ]
+azure = ["azure-identity>=1.25.3"]
 all = [
     "ibis-framework[duckdb,postgres,mysql,mssql,databricks,pyspark]>=12.0.0",
     "databricks-sdk>=0.120.0"
