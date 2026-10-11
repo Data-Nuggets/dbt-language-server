@@ -57,6 +57,9 @@ class Alias:
     # Excluded from __eq__ so two Aliases parsed from the same text compare equal.
     identifier: UUID = field(default_factory=uuid4, compare=False)
     ref_type: str = field(default_factory=str)
+    # What the name is qualified with: the source for `source('raw', 'cards')`,
+    # the schema for `raw.cards`. None for a bare name.
+    qualifier: str | None = None
 
     def __post_init__(self, source_text: str, match: re.Match):
         self.line_number = line_number_from_match(source_text, match)
@@ -91,17 +94,20 @@ def parse_alias_list(text: str) -> list[Alias]:
             source_text=text,
             match=m,
             ref_type="source",
+            qualifier=m.group(2),
         )
         for m in SOURCE_PATTERN.finditer(text)
     ]
     # CTE aliases
     aliases += [
         Alias(
-            ref=m.group("table"),
+            ref=m.group("table").rsplit(".", 1)[-1],
             alias=m.group("alias") or m.group("table").rsplit(".", 1)[-1],
             source_text=text,
             match=m,
             ref_type="cte",
+            # `db.raw.cards` -> "raw"
+            qualifier=(m.group("table").split(".")[-2:-1] or [None])[0],
         )
         for m in TABLE_PATTERN.finditer(text)
     ]

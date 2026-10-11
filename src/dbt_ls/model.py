@@ -900,6 +900,43 @@ def match_sources(
     return result
 
 
+def undocumented_tables(
+    models: list[Model],
+    sources: list[SourceTable],
+    tables: list[WarehouseTable],
+    profile_target: ProfileTarget,
+) -> list[SourceTable]:
+    """Warehouse tables that are neither a model nor a documented source.
+
+    Shaped like sources, named after their schema, so that everything which
+    completes for a documented source also works for a table nobody has
+    written YAML for yet.
+    """
+    by_name = _tables_by_name(tables)
+    database, schema = target_location(profile_target)
+    claimed = {
+        id(table)
+        for model in models
+        if (table := find_model_table(model, by_name, database, schema)) is not None
+    }
+    claimed |= {
+        id(table)
+        for source in sources
+        if (table := find_source_table(source, by_name)) is not None
+    }
+    return [
+        SourceTable(
+            name=table.name,
+            source_name=table.schema,
+            database=table.database,
+            schema=table.schema,
+            columns=table.columns,
+        )
+        for table in tables
+        if id(table) not in claimed and table.schema
+    ]
+
+
 def enrich_models_from_config(dbt_root: str) -> list[Model]:
 
     def _parse_config(config: dict):

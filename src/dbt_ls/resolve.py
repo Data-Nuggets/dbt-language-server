@@ -56,16 +56,28 @@ def compiled_relation_lookup(
     'dbtlsgluedatabase.int_cards' -> the int_cards model."""
     jinja = relation_lookup(models, sources)
     by_name: dict[str, HasColumns] = {m.name.casefold(): m for m in models}
+    # `raw.cards` names one table; `cards` alone could be any schema's.
+    by_schema_and_name: dict[tuple[str, str], HasColumns] = {}
     for s in sources:
         by_name.setdefault(s.name.casefold(), s)
+        by_schema_and_name.setdefault(
+            (
+                (s.schema or s.source_name).casefold(),
+                (s.identifier or s.name).casefold(),
+            ),
+            s,
+        )
     cte_by_name = {c.name.casefold(): c for c in ctes}
 
     def lookup(table: str) -> HasColumns | None:
         if (hit := jinja(table)) is not None:  # so it still works on raw model SQL
             return hit
-        key = table.split(".")[-1].strip('"`[] ').casefold()
+        parts = [part.strip('"`[] ').casefold() for part in table.split(".")]
+        key = parts[-1]
         if key in cte_by_name:
             return ColumnPool(cte_by_name[key].columns)
+        if len(parts) > 1 and (hit := by_schema_and_name.get((parts[-2], key))):
+            return hit
         return by_name.get(key)
 
     return lookup

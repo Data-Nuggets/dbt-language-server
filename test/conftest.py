@@ -54,6 +54,7 @@ def complete(
     *,
     models: list[Model] | None = None,
     sources: list[SourceTable] | None = None,
+    undocumented: list[SourceTable] | None = None,
     dialect: str = "duckdb",
 ) -> list[types.CompletionItem] | None:
     """Run completion on `text` at its `|` marker."""
@@ -70,6 +71,7 @@ def complete(
         profile_target=None,
         models=models or [],
         sources=sources or [],
+        undocumented=undocumented or [],
         dbt_root=DBT_ROOT,
     )
 

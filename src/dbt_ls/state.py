@@ -15,6 +15,7 @@ from dbt_ls.model import (
     match_models,
     match_sources,
     read_inline_locations,
+    undocumented_tables,
     read_warehouse_tables,
 )
 from dbt_ls.profiles import ProfileTarget
@@ -41,6 +42,9 @@ class ProjectState:
     profile_target: ProfileTarget | None
     models: list[Model] = field(default_factory=list)
     sources: list[SourceTable] = field(default_factory=list)
+    # Warehouse tables the project does not mention, as sources named after
+    # their schema. Filled by the warehouse read only.
+    undocumented: list[SourceTable] = field(default_factory=list)
     dbt_root: str = "."
     report: LoadReport = field(default_factory=LoadReport)
 
@@ -81,6 +85,9 @@ class ProjectState:
         if models := match_models(self.models, tables, self.profile_target):
             self.reconciliate_models(models)
         self.sources = match_sources(self.sources, tables)
+        self.undocumented = undocumented_tables(
+            self.models, self.sources, tables, self.profile_target
+        )
 
     def refresh_from_run_results(self, result_path: str):
 

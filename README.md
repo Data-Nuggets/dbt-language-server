@@ -9,6 +9,7 @@
 | Model completion | `textDocument/completion` | Suggests dbt models inside `ref('...')` |
 | Source completion | `textDocument/completion` | Suggests sources inside `source('...')`, auto-inserting the `source_name`, `table` pair   |
 | Column completion | `textDocument/completion` | Suggests columns for an aliased model/source (`alias.<column>`), with the column's data type shown as a detail. |
+| Undocumented tables | `textDocument/completion` | Warehouse tables the project has no YAML for still complete: inside `source('...')` (marked `not in sources.yml`), as `schema.table` after `from` / `join`, and their columns after an alias. Needs the `database` schema source. |
 | Go to definition | `textDocument/definition` | Jumps from `ref('model')` to that model's `.sql` file. |
 | Config enrichment | on `initialize` | Reads documented columns from the hand-written `schema.yml` files. |
 | Catalog enrichment | on `initialize` | Reads model and source column info from `target/catalog.json` when available. |
