@@ -1,9 +1,12 @@
+import asyncio
+import copy
 import logging
 import os
 import sys
+import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from uuid import uuid4
@@ -87,6 +90,12 @@ class DbtLanguageServer(LanguageServer):
         self.state: ProjectState | None = None
         self.settings: Settings = Settings()
         self.ast_cache = AstCache()
+        # Counts loads, so a warehouse read that finishes after a newer load
+        # has started can tell it is stale.
+        self.load_generation = 0
+        # The last run_results.json seen, to re-apply after a warehouse read
+        # that was still running when it arrived.
+        self.run_results_path: str | None = None
 
 
 server = DbtLanguageServer()
@@ -227,12 +236,12 @@ def _run_source(source: SchemaSource, state: ProjectState) -> SourceReport:
     return report
 
 
-def _load_project(root_path: str | None, settings: Settings) -> ProjectState:
-    """Build the project state. Raises only when there is no project to load.
+def _open_project(root_path: str | None) -> ProjectState:
+    """Find the project and what it declares. No schema source has run yet.
 
-    Anything short of that — no profile, a missing driver, a warehouse that
-    refuses the connection — is recorded on `state.report` and the load goes
-    on with whatever it could get.
+    Raises only when there is no project to load. Anything short of that — no
+    profile, a missing driver, a warehouse that refuses the connection — is
+    recorded on `state.report` and the load goes on with whatever it could get.
     """
     if not root_path:
         log.warning("Initialize received no root_path; skipping project discovery")
@@ -270,23 +279,71 @@ def _load_project(root_path: str | None, settings: Settings) -> ProjectState:
         report=report,
     )
     log.debug("Finished parsing documented models and sources")
+    return state
 
-    # Column enrichment. Each source is run in ascending priority order, so the
-    # last one that yields columns for a model is the one that wins. A source
-    # left out of `schema_sources` is never run at all
+
+def _run_sources(state: ProjectState, sources: tuple[SchemaSource, ...]) -> None:
+    """Column enrichment, in ascending priority order.
+
+    The last source that yields columns for a model is the one that wins. A
+    source left out of `schema_sources` is never run at all.
+    """
+    for source in sources:
+        log.debug("Enriching from %s", source.value)
+        state.report.sources.append(_run_source(source, state))
+
+
+def _load_project(root_path: str | None, settings: Settings) -> ProjectState:
+    """Build the whole project state, warehouse included, before returning."""
+    state = _open_project(root_path)
     if not settings.schema_sources:
         log.warning("No schema sources enabled; models will have no column info")
     else:
         log.info(f"Running with source settings: {settings}")
-
-    for source in settings.schema_sources:
-        log.debug("Enriching from %s", source.value)
-        report.sources.append(_run_source(source, state))
-
+    _run_sources(state, settings.schema_sources)
     return state
 
 
+def _split_at_warehouse(
+    sources: tuple[SchemaSource, ...],
+) -> tuple[tuple[SchemaSource, ...], tuple[SchemaSource, ...]]:
+    """Sources read from disk first, then the warehouse and all after it.
+
+    Whatever follows the warehouse has to wait for it, or it would lose its
+    place in the priority order.
+    """
+    if SchemaSource.DATABASE not in sources:
+        return sources, ()
+    at = sources.index(SchemaSource.DATABASE)
+    return sources[:at], sources[at:]
+
+
+def _with_late_sources(
+    state: ProjectState, sources: tuple[SchemaSource, ...]
+) -> ProjectState:
+    """A copy of `state` with `sources` applied; `state` itself is untouched.
+
+    This is the part that runs off the main thread, so it must not change
+    anything a completion request could be reading.
+    """
+    late = copy.copy(state)
+    late.models = list(state.models)
+    late.sources = list(state.sources)
+    late.report = replace(state.report, sources=list(state.report.sources))
+    _run_sources(late, sources)
+    return late
+
+
 def load_project(ls: DbtLanguageServer):
+    """Load the project; the warehouse is read in the background.
+
+    Everything that comes from disk is in place when this returns, so names
+    and documented columns complete at once. Live columns follow when the
+    warehouse has answered.
+    """
+    ls.load_generation += 1
+    generation = ls.load_generation
+    ls.run_results_path = None
 
     # Progress report setup
     token = "reload-project" + str(uuid.uuid4())
@@ -308,18 +365,65 @@ def load_project(ls: DbtLanguageServer):
         if reports_progress:
             ls.work_done_progress.end(token, types.WorkDoneProgressEnd(message=message))
 
+    def finish_with(state: ProjectState):
+        problems = state.report.problems
+        # Models and sources are loaded either way; a problem only means fewer
+        # columns, so it is a warning rather than the old all-or-nothing ❌.
+        finish(f"⚠️{problems[0]}" if problems else "Finished")
+
+    settings = ls.settings
+    if not settings.schema_sources:
+        log.warning("No schema sources enabled; models will have no column info")
+    else:
+        log.info(f"Running with source settings: {settings}")
+    from_disk, from_warehouse = _split_at_warehouse(settings.schema_sources)
+
     try:
-        ls.state = _load_project(ls.workspace.root_path, ls.settings)
+        state = _open_project(ls.workspace.root_path)
     except (NoRootPathError, NoDbtRootError) as exc:
         finish(f"❌{exc}")
         return
-
+    _run_sources(state, from_disk)
+    ls.state = state
     # Parse in the adapter's own dialect now that it is known.
-    ls.ast_cache.dialect = ls.state.report.dialect
-    problems = ls.state.report.problems
-    # Models and sources are loaded either way; a problem only means fewer
-    # columns, so it is a warning rather than the old all-or-nothing ❌.
-    finish(f"⚠️{problems[0]}" if problems else "Finished")
+    ls.ast_cache.dialect = state.report.dialect
+
+    if not from_warehouse:
+        finish_with(state)
+        return
+
+    def adopt(late: ProjectState):
+        # Back on the main thread. A reload since then has its own read coming.
+        if generation != ls.load_generation:
+            finish("Superseded by a newer load")
+            return
+        ls.state = late
+        # A dbt run that finished meanwhile was applied to the old state.
+        if ls.run_results_path:
+            late.refresh_from_run_results(ls.run_results_path)
+        finish_with(late)
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # No event loop: not running as a server, so there is nobody to keep
+        # responsive. Finish the load right here.
+        adopt(_with_late_sources(state, from_warehouse))
+        return
+
+    if reports_progress:
+        ls.work_done_progress.report(
+            token,
+            types.WorkDoneProgressReport(message="Reading columns from the warehouse"),
+        )
+
+    def read_warehouse():
+        late = _with_late_sources(state, from_warehouse)
+        loop.call_soon_threadsafe(adopt, late)
+
+    # A daemon thread, so a warehouse that never answers cannot keep the
+    # server alive after the editor has closed it.
+    threading.Thread(target=read_warehouse, name="dbt-ls-warehouse", daemon=True).start()
 
 
 @server.feature(types.WORKSPACE_DID_CHANGE_WATCHED_FILES)
@@ -328,6 +432,7 @@ def run_results(ls: DbtLanguageServer, params: types.DidChangeWatchedFilesParams
         change_path = to_fs_path(change.uri)
         if change_path and change_path.endswith("run_results.json"):
             log.info(f"{change.type}: {to_fs_path(change.uri)}")
+            ls.run_results_path = change_path
             if ls.state:
                 ls.state.refresh_from_run_results(change_path)
 
