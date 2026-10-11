@@ -23,6 +23,7 @@ dev = [
     "hatch>=1.16.5",
     "twine>=6.2.0",
     "ibis-framework[duckdb,postgres,mysql,mssql,databricks,pyspark]>=12.0.0",
+    "pyspark[connect]>=3.5",
     "databricks-sdk>=0.120.0",
     "boto3>=1.43.46",
     "botocore[crt]>=1.43.46",
@@ -34,7 +35,9 @@ duckdb = ["ibis-framework[duckdb]>=12.0.0"]
 postgres = ["ibis-framework[postgres]>=12.0.0"]
 mysql = ["ibis-framework[mysql]>=12.0.0"]
 sqlserver = ["ibis-framework[mssql]>=12.0.0"]
-pyspark = ["ibis-framework[pyspark]>=12.0.0"]
+# The reader uses Spark Connect, whose client needs grpc and friends; plain
+# pyspark does not pull them in.
+pyspark = ["ibis-framework[pyspark]>=12.0.0", "pyspark[connect]>=3.5"]
 databricks = ["databricks-sdk>=0.120.0"]
 aws = [
     "boto3>=1.43.46",
@@ -43,6 +46,7 @@ aws = [
 azure = ["azure-identity>=1.25.3"]
 all = [
     "ibis-framework[duckdb,postgres,mysql,mssql,databricks,pyspark]>=12.0.0",
+    "pyspark[connect]>=3.5",
     "databricks-sdk>=0.120.0"
     ]
 
@@ -55,3 +59,8 @@ build-backend = "hatchling.build"
 
 [tool.pytest.ini_options]
 testpaths = ["test"]
+# The container tests need running warehouses: see test/compose.yml.
+addopts = "-m 'not containers'"
+markers = [
+    "containers: needs the warehouses in test/compose.yml; run with `-m containers`",
+]

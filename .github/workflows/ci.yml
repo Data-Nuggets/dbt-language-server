@@ -28,6 +28,47 @@ jobs:
       - name: Run tests
         run: uv run pytest -vv
 
+  containers:
+    # The warehouse readers against real Postgres, MySQL, SQL Server and Spark.
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - uses: astral-sh/setup-uv@v6
+
+      - run: uv sync
+
+      - name: Install the SQL Server ODBC driver if the runner lacks it
+        run: |
+          if ! odbcinst -q -d -n "ODBC Driver 18 for SQL Server" >/dev/null 2>&1; then
+            curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
+              | sudo gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
+            curl -fsSL "https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/prod.list" \
+              | sudo tee /etc/apt/sources.list.d/mssql-release.list
+            sudo apt-get update
+            sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18
+          fi
+
+      - uses: extractions/setup-just@v3
+
+      - name: Start the warehouses
+        run: just containers-up
+
+      # A warehouse that did not start is a failure here, not a skip.
+      - name: Run container tests
+        run: just test-containers -vv
+
+      - name: Show warehouse logs
+        if: failure()
+        run: docker compose -f test/compose.yml logs --tail 200
+
   build:
     # Runs only when a version tag is pushed.
     if: github.event_name == 'push' && startsWith(github.event.ref, 'refs/tags/')
