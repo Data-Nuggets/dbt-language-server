@@ -14,3 +14,7 @@ wheels/
 logs/
 .env
 local/
+
+# Built by docs/build.py; GitHub Pages builds its own copy in CI.
+docs/index.html
+site/

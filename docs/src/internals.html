@@ -1,0 +1,118 @@
+    <section id="startup" data-toc="How it starts">
+      <h2>How it starts</h2>
+      <p>The project is built when the editor sends <code>initialized</code>. The entry point is <code>load_project</code> in <code>server.py</code>. Since 0.4.1 it does the fast part at once and hands the warehouse read to a background thread, so the first completion does not wait for the warehouse. <code>dbt-ls check</code> uses the synchronous <code>_load_project</code> instead.</p>
+      <ol class="steps">
+        <li><div><h3>Find the project root</h3><p><code>find_dbt_project_root</code> walks up from the opened folder looking for <code>dbt_project.yml</code>, then searches downward, skipping <code>target</code>, <code>dbt_packages</code> and virtual environments.</p></div></li>
+        <li><div><h3>Resolve the profile</h3><p><code>Profiles.locate</code> looks for <code>profiles.yml</code> in the project root, then <code>~/.dbt</code>. <code>ProfileTarget.from_dict</code> picks a dataclass by <code>type</code>, renders <code>env_var()</code>, coerces types and wraps secrets. A failure here no longer stops the load: it is recorded, shown as a warning, and the server continues without live columns.</p></div></li>
+        <li><div><h3>Discover models and sources</h3><p><code>ProjectState.__post_init__</code> lists every <code>.sql</code> under the model paths as a model, and every table under a <code>sources:</code> key in any YAML file.</p></div></li>
+        <li><div><h3>Add columns from files</h3><p>Runs <code>refresh_from_config</code> and <code>refresh_from_catalog</code> in the order given by <code>--schema-sources</code>. Each one overwrites the columns of the models it knows about. The server now answers requests.</p></div></li>
+        <li><div><h3>Read the warehouse in the background</h3><p><code>_split_at_warehouse</code> cuts the source list at <code>database</code>. A daemon thread runs that source and any after it on a copy of the state, then hands the copy over on the event loop with <code>call_soon_threadsafe</code>. A reload bumps <code>load_generation</code>, so a read that finishes late is thrown away.</p></div></li>
+        <li><div><h3>Pick the SQL dialect</h3><p><code>dialect_for_profile_type</code> maps the profile type to a sqlglot dialect for the per-file parser. Unknown types fall back to postgres.</p></div></li>
+        <li><div><h3>Watch for dbt runs</h3><p>Registers a watcher on <code>**/target/run_results.json</code>. Each change re-derives columns from the compiled SQL in that file.</p></div></li>
+      </ol>
+    </section>
+
+    <section id="modules" data-toc="Module map">
+      <h2>Module map</h2>
+      <p>All of it lives in <code>src/dbt_ls</code>. Four files hold nearly all the logic that is hard to remember: <code>scope.py</code>, <code>alias.py</code>, <code>resolve.py</code> and <code>model.py</code>.</p>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th>Module</th><th>Lines</th><th>What it owns</th></tr></thead>
+          <tbody>
+            <tr><td><code>server.py</code></td><td>826</td><td>LSP handlers, project loading in two stages and its error handling, <code>serve_completions</code>, <code>columns_for</code>, the two commands.</td></tr>
+            <tr><td><code>model.py</code></td><td>996</td><td>The <code>Model</code> type, model discovery, the YAML and catalog readers, all nine warehouse readers with their registry, and the matching of warehouse tables to models and sources.</td></tr>
+            <tr><td><code>scope.py</code></td><td>614</td><td>The jinja-tolerant sqlglot dialect, the mid-edit repairs, the per-file AST cache, and turning a query into CTEs, tables and select lists.</td></tr>
+            <tr><td><code>profiles.py</code></td><td>333</td><td>Finding and reading <code>profiles.yml</code>, one dataclass per adapter, helpful errors for missing or misspelled keys.</td></tr>
+            <tr><td><code>state.py</code></td><td>209</td><td><code>ProjectState</code>: the models, sources and undocumented tables shared by all handlers, the refresh methods, the merge rule, and the <code>run_results.json</code> reader.</td></tr>
+            <tr><td><code>alias.py</code></td><td>181</td><td>Regex search for alias declarations, and choosing the declaration that is in scope at the cursor.</td></tr>
+            <tr><td><code>resolve.py</code></td><td>146</td><td>Giving CTE columns their data types by following them to the model or source they come from, and expanding <code>*</code>.</td></tr>
+            <tr><td><code>source.py</code></td><td>80</td><td>The <code>SourceTable</code> type, source discovery from YAML, source columns from the catalog.</td></tr>
+            <tr><td><code>pattern.py</code></td><td>50</td><td>The regexes that decide what the cursor is completing, from the text left of it on the current line.</td></tr>
+            <tr><td><code>cli.py</code></td><td>72</td><td>Argument parsing, stdio or TCP transport, and handing <code>dbt-ls check</code> to <code>check.py</code>.</td></tr>
+            <tr><td><code>check.py</code></td><td>156</td><td>The <code>dbt-ls check</code> command: loads a project outside an editor and prints or returns as JSON what each schema source gave.</td></tr>
+            <tr><td><code>report.py</code></td><td>51</td><td><code>LoadReport</code>: what happened during a load, per schema source, with outcome, timing and counts.</td></tr>
+            <tr><td><code>seed.py</code></td><td>77</td><td>Unfinished and untracked. Nothing imports it.</td></tr>
+            <tr><td><code>editors/vscode</code></td><td>231</td><td>The VS Code client: one server process per dbt project, command routing.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="columns" data-toc="Column completion">
+      <h2>Column completion, step by step</h2>
+      <p>This is the most intricate path in the project. It mixes two techniques on purpose: regexes on raw text, which survive half-typed SQL, and a parsed tree, which knows where query blocks begin.</p>
+      <div class="flow">
+        <div style="--c: var(--heron-orange-bright)"><b>1. Classify</b><span><code>pattern.py</code> sees <code>c.</code> left of the cursor and returns kind <code>column</code>, alias <code>c</code>.</span></div>
+        <div style="--c: var(--heron-teal-bright)"><b>2. Cached tree</b><span><code>AstCache.get</code> returns the last version of the file that parsed. Completion itself never parses.</span></div>
+        <div style="--c: var(--heron-ochre-bright)"><b>3. Find aliases</b><span><code>parse_alias_list</code> runs three regexes over the live text: <code>ref</code>, <code>source</code>, and plain tables. Each keeps its qualifier: the source name, or the schema.</span></div>
+        <div style="--c: var(--heron-rose-bright)"><b>4. Pick by scope</b><span><code>choose_alias</code> keeps the declaration inside the query block the cursor is in.</span></div>
+        <div style="--c: var(--heron-olive-bright)"><b>5. Type the CTEs</b><span><code>resolve_ctes</code> copies data types from models and sources onto CTE columns.</span></div>
+        <div style="--c: var(--heron-orange-bright)"><b>6. Look up</b><span><code>columns_for</code> finds the relation among CTEs, models, sources and undocumented tables, using the qualifier to tell <code>raw.cards</code> from <code>crm.cards</code>.</span></div>
+      </div>
+
+      <h3 class="sub">What wins when a name is known twice</h3>
+      <p>What the project declares always wins. An undocumented warehouse table is used only when no CTE, model or documented source has the name. A bare <code>from orders o</code> uses one only if exactly one schema has a table called <code>orders</code>; with a schema in front there is no guessing.</p>
+
+      <h3 class="sub">Parsing dbt SQL without rendering jinja</h3>
+      <p><code>dbt_dialect</code> in <code>scope.py</code> subclasses whichever sqlglot dialect the profile needs. A <code>{{ ref('x') }}</code> then parses as a table whose name is the jinja text, which <code>resolve.py</code> later matches with a regex.</p>
+      <div class="window">
+        <div class="window-bar"><span class="dots"><i></i><i></i><i></i></span><span>src/dbt_ls/scope.py</span><button type="button" data-copy>Copy</button></div>
+        <pre class="hl"><code><span class="k">class</span><span class="w"> </span><span class="nc">DbtDialect</span><span class="p">(</span><span class="n">base</span><span class="p">):</span>
+    <span class="k">class</span><span class="w"> </span><span class="nc">Tokenizer</span><span class="p">(</span><span class="n">base</span><span class="o">.</span><span class="n">tokenizer_class</span><span class="p">):</span>
+        <span class="c1"># {{ ... }} becomes one raw-string token</span>
+        <span class="n">RAW_STRINGS</span> <span class="o">=</span> <span class="p">[</span><span class="o">*</span><span class="n">base</span><span class="o">.</span><span class="n">tokenizer_class</span><span class="o">.</span><span class="n">RAW_STRINGS</span><span class="p">,</span> <span class="p">(</span><span class="s2">"{{"</span><span class="p">,</span> <span class="s2">"}}"</span><span class="p">),</span> <span class="p">(</span><span class="s2">"{{-"</span><span class="p">,</span> <span class="s2">"}}"</span><span class="p">)]</span>
+        <span class="c1"># {% ... %} is skipped like a comment</span>
+        <span class="n">COMMENTS</span> <span class="o">=</span> <span class="p">[</span><span class="o">*</span><span class="n">base</span><span class="o">.</span><span class="n">tokenizer_class</span><span class="o">.</span><span class="n">COMMENTS</span><span class="p">,</span> <span class="p">(</span><span class="s2">"{%"</span><span class="p">,</span> <span class="s2">"%}"</span><span class="p">),</span> <span class="p">(</span><span class="s2">"{%-"</span><span class="p">,</span> <span class="s2">"%}"</span><span class="p">)]</span>
+
+    <span class="k">class</span><span class="w"> </span><span class="nc">Parser</span><span class="p">(</span><span class="n">base</span><span class="o">.</span><span class="n">parser_class</span><span class="p">):</span>
+        <span class="c1"># ...and a raw string is allowed wherever an identifier is</span>
+        <span class="n">ID_VAR_TOKENS</span> <span class="o">=</span> <span class="p">{</span><span class="o">*</span><span class="n">base</span><span class="o">.</span><span class="n">parser_class</span><span class="o">.</span><span class="n">ID_VAR_TOKENS</span><span class="p">,</span> <span class="n">TokenType</span><span class="o">.</span><span class="n">RAW_STRING</span><span class="p">}</span></code></pre>
+      </div>
+      <p>The weakness: a jinja expression that stands alone as a statement, rather than in place of a name, is a syntax error. That is exactly what a <code>{{ config(...) }}</code> header is, which is why <code>neutralise_jinja</code> blanks such calls out before parsing.<span data-internal> See finding F1.</span></p>
+
+      <h3 class="sub">Surviving half-typed SQL</h3>
+      <p>The tree is refreshed on open, change and save. When the text does not parse, <code>repaired_variants</code> tries rewrites that keep every line number intact: a placeholder column after a dangling <code>a.</code> at the end of a line, removal of a trailing comma, a placeholder in an empty <code>SELECT</code>, and a final <code>SELECT</code> appended after a lone <code>WITH</code>. If all fail, the previous tree is kept.</p>
+
+      <h3 class="sub">Why scope uses block starts, not block ends</h3>
+      <p><code>find_block_range</code> in <code>alias.py</code> treats a block as running from its own start to the start of the next block. sqlglot's end offsets stop at the last token it parsed, so a <code>WHERE</code> being typed would otherwise fall outside its own query. When no block covers the cursor, a single matching declaration is accepted as a fallback, so a brand-new CTE still completes.</p>
+
+      <h3 class="sub">Coordinates</h3>
+      <p>Three conventions meet here, which is easy to trip over. LSP positions are 0-based lines. <code>Alias</code> and <code>Position</code> use 1-based lines and 0-based columns. sqlglot gives character offsets, with an inclusive end. <code>serve_completions</code> converts at the boundary, and offsets are always resolved against the text that was parsed, not the live buffer.</p>
+    </section>
+
+    <section id="enrichment" data-toc="Column sources">
+      <h2>Where column information comes from</h2>
+      <p>A model starts as a name and a file path. Up to four sources then add columns. The rule in <code>Model.merged_with</code> is simple: a later source replaces the whole column list if it has any columns, and never touches the path.</p>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th>Source</th><th>Reads</th><th>Gives</th><th>Runs</th></tr></thead>
+          <tbody>
+            <tr><td><code>config</code></td><td>Every YAML file with a <code>models:</code> key</td><td>Documented column names, no types</td><td>At load</td></tr>
+            <tr><td><code>catalog</code></td><td><code>target/catalog.json</code></td><td>Names and types as of the last <code>dbt docs generate</code>, for models and sources</td><td>At load</td></tr>
+            <tr><td><code>database</code></td><td>The warehouse in the active target</td><td>Live names and types for every table. Tables matching a model or documented source give it columns; the rest are kept as undocumented tables</td><td>In the background, after load</td></tr>
+            <tr><td>run results</td><td><code>target/run_results.json</code></td><td>Names from the compiled select list, types only for columns passed straight through</td><td>After each dbt run</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="window">
+        <div class="window-bar"><span class="dots"><i></i><i></i><i></i></span><span>shell</span><button type="button" data-copy>Copy</button></div>
+        <pre class="hl"><code><span class="c1"># default: every source, warehouse last (so it wins)</span>
+dbt-ls<span class="w"> </span>--schema-sources<span class="w"> </span>config,catalog,database
+
+<span class="c1"># never opens a warehouse connection - works on every platform</span>
+dbt-ls<span class="w"> </span>--schema-sources<span class="w"> </span>config,catalog</code></pre>
+      </div>
+      <p>Two consequences worth remembering. The order is only expressed by call order, there is no stored priority, so the run-results refresh always wins over the warehouse even though it knows less. Warehouse matching goes by schema, and by the alias, schema and database a model declares; the other sources still match by bare model name.</p>
+    </section>
+
+    <section id="backends" data-toc="Warehouse readers">
+      <h2>How the warehouse readers are built</h2>
+      <p>Each reader in <code>model.py</code> has the same signature and is registered by profile type in <code>_DATABASE_METHOD_REGISTRY</code>. A matching dataclass in <code>profiles.py</code> is registered in <code>_TARGET_REGISTRY</code>. Adding a platform means adding one of each.</p>
+      <div class="grid wide">
+        <div class="card"><span class="badge">ibis family</span><h3>DuckDB, Postgres, MySQL, SQL Server, Spark</h3><p>Open an ibis connection. The first four then read every column of the database in one statement (<code>_ALL_COLUMNS_SQL</code>), so types read as the warehouse names them, such as <code>numeric(18,2)</code>. If the statement fails, and always for Spark, <code>_tables_one_by_one</code> makes one request per table.</p></div>
+        <div class="card"><span class="badge">API family</span><h3>Databricks, Athena, Glue, Redshift</h3><p>Call the vendor's metadata API directly. No SQL engine needs to be running, except Redshift, which runs one query through the Data API and polls for the result.</p></div>
+      </div>
+      <p style="margin-top:22px">Since 0.4.0 every reader returns a plain list of tables, each with its schema and, where known, its database. <code>match_models</code> and <code>match_sources</code> then decide which table belongs to which model or source, in one place for all nine platforms.</p>
+      <p>Adding Snowflake, BigQuery or Fabric now means writing a function that lists tables; the matching comes for free.</p>
+      <p>Since 0.4.1 the tables that match nothing are not dropped. <code>undocumented_tables</code> turns them into source-like entries named after their schema, kept on <code>state.undocumented</code>. Readers still scan only the profile's own database, so sources in a second database, such as a Fabric lakehouse, are not found yet.</p>
+    </section>
