@@ -632,9 +632,11 @@ def enrich_models_from_config(dbt_root: str) -> list[Model]:
             Model(
                 m["name"],
                 Path(""),
-                tuple(Column(c["name"]) for c in m["columns"]),
+                # Plenty of entries only carry a description or tests.
+                tuple(Column(c["name"]) for c in m.get("columns") or []),
             )
-            for m in config["models"]
+            for m in config["models"] or []
+            if isinstance(m, dict) and "name" in m
         ]
 
     models: list[Model] = []
