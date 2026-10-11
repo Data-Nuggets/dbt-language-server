@@ -386,6 +386,168 @@ _TRAILING_COMMA = re.compile(
 )
 
 
+# Jinja the parser cannot see past. `dbt_dialect` copes with an expression
+# standing where a name is expected and skips `{% ... %}` tags, but that
+# leaves four shapes that are a syntax error however the SQL around them is
+# written. `neutralise_jinja` overwrites those with spaces — same length, same
+# line breaks — so offsets into the result are still offsets into the buffer.
+_TAG_NAME = re.compile(r"\{%-?\s*(\w+)")
+_CONFIG_CALL = re.compile(r"\{\{-?\s*config\s*\(")
+# A stretch with nothing in it that could start a comment, string or jinja.
+_PLAIN_SQL = re.compile(r"[^\s;{'\"/-]+")
+_BLOCK_END = {"set": "endset", "call": "endcall"}
+_BRANCH_END = {"if": "endif", "for": "endfor"}
+
+
+def _expression_end(text: str, start: int) -> int | None:
+    """Offset just past the `}}` closing an expression whose `{{` ends at `start`.
+
+    Brackets are counted, because a dict argument can end in the same two
+    characters: `{{ m({'a': {'b': 1}}) }}`. None when there is no clean end,
+    which is what an expression still being typed looks like — a second `{{`
+    turning up first, or the text running out.
+    """
+    depth, quote, i = 0, "", start
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == "\\":
+                i += 1  # skip the escaped character
+            elif ch == quote or ch == "\n":
+                # A string left open is far likelier than one spanning lines,
+                # and must not swallow the rest of the file.
+                quote = ""
+        elif ch in "'\"":
+            quote = ch
+        elif text.startswith("{{", i):
+            return None
+        elif ch in "([{":
+            depth += 1
+        elif ch == "}" and depth == 0:
+            return i + 2 if text.startswith("}}", i) else None
+        elif ch in ")]}":
+            depth = max(depth - 1, 0)
+        i += 1
+    return None
+
+
+def _pieces(text: str) -> Iterator[tuple[str, int, int]]:
+    """Split `text` into (kind, start, end), just finely enough to tell jinja
+    from SQL: "tag", "expr", "semi", "skip" for comments and whitespace, and
+    "sql" for everything else."""
+    i, n = 0, len(text)
+    while i < n:
+        kind, end = "sql", i + 1
+        if text.startswith("{#", i) and (close := text.find("#}", i + 2)) != -1:
+            kind, end = "skip", close + 2
+        elif text.startswith("/*", i) and (close := text.find("*/", i + 2)) != -1:
+            kind, end = "skip", close + 2
+        elif text.startswith("--", i):
+            close = text.find("\n", i)
+            kind, end = "skip", n if close == -1 else close
+        elif text.startswith("{%", i) and (close := text.find("%}", i + 2)) != -1:
+            kind, end = "tag", close + 2
+        elif text.startswith("{{", i):
+            if (close := _expression_end(text, i + 2)) is not None:
+                kind, end = "expr", close
+            else:
+                end = i + 2
+        elif text[i] in "'\"":
+            # A quoted SQL string or identifier is opaque, jinja inside it
+            # included. One left open ends at the line break.
+            close = text.find(text[i], i + 1)
+            if close != -1 and "\n" not in text[i:close]:
+                end = close + 1
+        elif text[i].isspace():
+            kind = "skip"
+        elif text[i] == ";":
+            kind = "semi"
+        elif (run := _PLAIN_SQL.match(text, i)) is not None:
+            end = run.end()
+        yield kind, i, end
+        i = end
+
+
+def _dead_regions(text: str, pieces: list[tuple[str, int, int]]) -> list[Span]:
+    """Stretches that are template logic rather than part of the query.
+
+    - `{% set x %}...{% endset %}` and `{% call ... %}...{% endcall %}`: the
+      body is captured or run separately, never part of this statement.
+    - Every branch of an `{% if %}` or `{% for %}` after the first. Only one
+      branch is ever rendered; left side by side they are two WHERE clauses.
+      The first is kept because it is the one written for the common case.
+    """
+    regions: list[Span] = []
+    block: tuple[str, int] | None = None  # (closing tag name, start offset)
+    branches: list[list] = []  # [closing tag name, offset of first else | None]
+    for kind, start, end in pieces:
+        if kind != "tag" or (match := _TAG_NAME.match(text, start)) is None:
+            continue
+        name = match.group(1)
+        if block is not None:
+            if name == block[0]:
+                regions.append(Span(block[1], end))
+                block = None
+        elif name in _BLOCK_END and (name == "call" or "=" not in text[start:end]):
+            block = (_BLOCK_END[name], start)
+        elif name in _BRANCH_END:
+            branches.append([_BRANCH_END[name], None])
+        elif name in ("else", "elif"):
+            if branches and branches[-1][1] is None:
+                branches[-1][1] = start
+        elif branches and name == branches[-1][0]:
+            _, else_start = branches.pop()
+            if else_start is not None:
+                regions.append(Span(else_start, start))
+    return regions
+
+
+def neutralise_jinja(source: str) -> str:
+    """`source` with the jinja that breaks parsing overwritten by spaces.
+
+    On top of the regions from `_dead_regions`:
+
+    - An expression that opens a statement, `{{ config(...) }}` above all, but
+      equally `{{ log(...) }}` or a setup macro. It renders to nothing or to
+      SQL of its own; either way nothing after it depends on it. `config` is
+      blanked wherever it stands.
+    - Braces inside any other expression, so the tokenizer's own search for
+      the closing `}}` cannot stop early inside a dict literal.
+
+    Anything unbalanced or still being typed is left exactly as it is.
+    """
+    pieces = list(_pieces(source))
+    regions = _dead_regions(source, pieces)
+    chars = list(source)
+
+    def blank(start: int, end: int, only: str = "") -> None:
+        for i in range(start, end):
+            if chars[i] != "\n" and (not only or chars[i] in only):
+                chars[i] = " "
+
+    # A flag per character rather than a search through `regions` per piece:
+    # this runs on every keystroke.
+    dead = bytearray(len(source))
+    for region in regions:
+        blank(region.start, region.end)
+        dead[region.start : region.end] = b"\x01" * (region.end - region.start)
+
+    statement_start = True
+    for kind, start, end in pieces:
+        if kind in ("skip", "tag") or dead[start]:
+            continue
+        if kind == "semi":
+            statement_start = True
+        elif kind == "sql":
+            statement_start = False
+        elif statement_start or _CONFIG_CALL.match(source, start):
+            blank(start, end)
+        else:
+            blank(start + 2, end - 2, only="{}")
+            statement_start = False
+    return "".join(chars)
+
+
 def repaired_variants(source: str) -> Iterator[str]:
     """Parseable rewrites of a mid-edit document, most faithful first.
 
@@ -424,6 +586,7 @@ class AstCache:
 
     def refresh(self, uri: str, source: str) -> ParsedDocument | None:
         """Re-parse `source`, repairing it if need be; on failure keep the cache."""
+        source = neutralise_jinja(source)
         for candidate in chain((source,), repaired_variants(source)):
             try:
                 ast = sqlglot.parse_one(candidate, read=dbt_dialect(self.dialect))
