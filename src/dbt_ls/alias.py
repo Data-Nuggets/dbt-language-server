@@ -13,9 +13,14 @@ from dbt_ls.scope import (
     span_to_range,
 )
 
-REF_PATTERN = re.compile(r"""\{{\s*ref\((['"])(\w+)\1\)\s*}}\s+(?:as\s+)?(\w+)""")
+# Whitespace is allowed wherever jinja allows it — `{{- ref( 'x' ) -}}` is the
+# same call as `{{ ref('x') }}`.
+REF_PATTERN = re.compile(
+    r"""\{\{-?\s*ref\(\s*(['"])(\w+)\1\s*\)\s*-?}}\s+(?:as\s+)?(\w+)"""
+)
 SOURCE_PATTERN = re.compile(
-    r"""\{{\s*source\((['"])(\w+)\1,\s*(['"])(\w+)\3\)\s*}}\s+(?:as\s+)?(\w+)"""
+    r"""\{\{-?\s*source\(\s*(['"])(\w+)\1\s*,\s*(['"])(\w+)\3\s*\)\s*-?}}"""
+    r"""\s+(?:as\s+)?(\w+)"""
 )
 _NON_ALIAS = (
     r"(?:as|on|using|where|group|order|having|limit|offset|fetch|qualify|window"
@@ -152,6 +157,9 @@ def choose_alias(
     fallback, a new CTE would offer no completions until it was finished.
     """
 
+    # parse_alias_list lowercases the document, so the alias as typed at the
+    # cursor has to be folded the same way to match.
+    alias = alias.lower()
     filtered_by_alias = sorted(
         (a for a in aliases if a.alias == alias),
         key=lambda a: (a.line_number, a.column_number),

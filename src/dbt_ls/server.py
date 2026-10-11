@@ -388,13 +388,15 @@ def serve_completions(
     sources = state.sources
     dbt_root = state.dbt_root
 
-    current_line = document.lines[pos.line].strip()
+    # A cursor after the final newline sits on a line `document.lines` does
+    # not have.
     line = document.lines[pos.line] if pos.line < len(document.lines) else ""
+    current_line = line.strip()
     line_prefix = line[: pos.character]
 
     ctx = completion_context(line_prefix)
     if ctx is None:
-        log.debug("no pattern matched for %r", current_line, " (early exit)")
+        log.debug("no pattern matched for %r (early exit)", current_line)
         return None
 
     log.debug("completion @ %d:%d | line=%r", pos.line, pos.character, current_line)
@@ -419,6 +421,9 @@ def serve_completions(
             for m in models
         ]
     elif kind == "source_name":
+        # Close the first argument and open the second with the quote the user
+        # is already typing with, so the result is balanced either way.
+        quote = info["quote"]
         log.info(
             "SOURCE path matched %r → serving %d sources: %s",
             current_line,
@@ -432,10 +437,29 @@ def serve_completions(
                 label_details=types.CompletionItemLabelDetails(
                     description=s.source_name
                 ),
-                insert_text=f'{s.source_name}", "{s.name}',
+                insert_text=f"{s.source_name}{quote}, {quote}{s.name}",
                 insert_text_format=types.InsertTextFormat.PlainText,
             )
             for s in sources
+        ]
+    elif kind == "source_table":
+        wanted = info["source"].casefold()
+        tables = [s for s in sources if s.source_name.casefold() == wanted]
+        log.info(
+            "SOURCE TABLE path matched %r → serving %d tables of %r",
+            current_line,
+            len(tables),
+            info["source"],
+        )
+        return [
+            types.CompletionItem(
+                s.name,
+                kind=types.CompletionItemKind(10),
+                label_details=types.CompletionItemLabelDetails(
+                    description=s.source_name
+                ),
+            )
+            for s in tables
         ]
     elif kind == "column":
         alias = info["alias"]
