@@ -12,8 +12,10 @@ from dbt_ls.model import (
     discover_models,
     enrich_models_from_catalog,
     enrich_models_from_config,
-    enrich_models_from_database,
-    filter_documented_database_sources,
+    match_models,
+    match_sources,
+    read_inline_locations,
+    read_warehouse_tables,
 )
 from dbt_ls.profiles import ProfileTarget
 from dbt_ls.project import Project
@@ -69,18 +71,16 @@ class ProjectState:
     def refresh_from_database(self):
         if self.profile_target is None:
             return
-        models, leftover_sources = enrich_models_from_database(
-            models=self.models,
-            profile_target=self.profile_target,
-            project_root=self.dbt_root,
-        )
-        if models:
+        tables = read_warehouse_tables(self.profile_target, self.dbt_root)
+        if not tables:
+            return
+        # Only now, when there is something to match against: where each model
+        # says it is built. In-file config wins over the YAML already merged.
+        if located := read_inline_locations(self.models):
+            self.reconciliate_models(located)
+        if models := match_models(self.models, tables, self.profile_target):
             self.reconciliate_models(models)
-        if leftover_sources:
-            documented_sources, undocumented_sources = (
-                filter_documented_database_sources(self.sources, leftover_sources)
-            )
-            self.sources = documented_sources
+        self.sources = match_sources(self.sources, tables)
 
     def refresh_from_run_results(self, result_path: str):
 
