@@ -207,6 +207,12 @@ class QueryRef:
     columns: list[QueryColumn] = field(default_factory=list)
     is_cte: bool = False
 
+    @property
+    def bare_name(self) -> str:
+        """What columns are qualified with when there is no alias: `cards.id`
+        for `from raw.cards`. Jinja text is left whole."""
+        return self.table if "(" in self.table else self.table.rsplit(".", 1)[-1]
+
 
 @dataclass
 class CTERef:
@@ -251,7 +257,9 @@ def table_ref(node: exp.Expr, ref_type: Literal["from", "join"]) -> QueryRef | N
     """
     if not isinstance(node, exp.Table):
         return None
-    return QueryRef(table=node.name.strip(), ref_type=ref_type, alias=node.alias)
+    # Keep the schema: `raw.cards` and `crm.cards` are different tables.
+    name = f"{node.db}.{node.name.strip()}" if node.db else node.name.strip()
+    return QueryRef(table=name, ref_type=ref_type, alias=node.alias)
 
 
 def parse_cte(cte: exp.CTE) -> CTERef:
@@ -269,7 +277,7 @@ def parse_cte(cte: exp.CTE) -> CTERef:
             cte_ref.tables.append(ref)
 
     # A table with no alias is qualified by its own name instead.
-    by_alias = {t.alias or t.table: t for t in cte_ref.tables}
+    by_alias = {t.alias or t.bare_name: t for t in cte_ref.tables}
     # An unqualified column is only attributable when there is one candidate.
     sole_table = cte_ref.tables[0] if len(cte_ref.tables) == 1 else None
 
@@ -331,7 +339,7 @@ def parse_ast(ast: exp.Expr, name: str = "") -> ModelRef:
             model_ref.tables.append(ref)
 
     # A table with no alias is qualified by its own name instead.
-    by_alias = {t.alias or t.table: t for t in model_ref.tables}
+    by_alias = {t.alias or t.bare_name: t for t in model_ref.tables}
     # An unqualified column is only attributable when there is one candidate.
     sole_table = model_ref.tables[0] if len(model_ref.tables) == 1 else None
 

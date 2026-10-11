@@ -45,6 +45,10 @@ def render(state: ProjectState) -> str:
                 "sources",
                 f"{len(state.sources)} tables in {len(source_names)} sources",
             ),
+            (
+                "undocumented",
+                f"{len(state.undocumented)} more warehouse tables, offered in completion",
+            ),
         ]
     )
 
@@ -97,6 +101,7 @@ def as_json(state: ProjectState) -> str:
             "ok": state.report.ok,
             "models": len(state.models),
             "source_tables": len(state.sources),
+            "undocumented_tables": len(state.undocumented),
             "models_without_columns": sorted(
                 m.name for m in state.models if not m.columns
             ),

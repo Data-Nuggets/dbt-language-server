@@ -14,6 +14,10 @@ SOURCE_RE = re.compile(
 )
 COLUMN_RE = re.compile(r"(?P<alias>[a-zA-Z_]\w*)\.(?P<col>[a-zA-Z0-9_]*)$")
 FROM_RE = re.compile(r"\b(?:from|join)\s+(?P<name>\w*)$", re.IGNORECASE)
+# `from raw.` — a schema has been named, the table is being typed.
+FROM_SCHEMA_RE = re.compile(
+    r"\b(?:from|join)\s+(?P<schema>\w+)\.(?P<name>\w*)$", re.IGNORECASE
+)
 
 
 def completion_context(line_prefix: str):
@@ -26,6 +30,9 @@ def completion_context(line_prefix: str):
         return ("source_name", {"quote": m.group("q1")})
     if m := REF_RE.search(line_prefix):
         return ("ref", {})
+    # Before the column pattern, which would read `raw.` as an alias.
+    if m := FROM_SCHEMA_RE.search(line_prefix):
+        return ("table", {"schema": m.group("schema")})
     if m := COLUMN_RE.search(line_prefix):
         return ("column", {"alias": m.group("alias")})
     if m := FROM_RE.search(line_prefix):

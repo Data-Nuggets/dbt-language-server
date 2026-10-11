@@ -515,34 +515,65 @@ def did_close(ls: DbtLanguageServer, params: types.DidCloseTextDocumentParams):
     ls.ast_cache.discard(params.text_document.uri)
 
 
+# How a warehouse table without YAML is marked in the completion list.
+UNDOCUMENTED = "not in sources.yml"
+WAREHOUSE_TABLE = "warehouse table"
+# Sorts after every identifier, so what the project declares is offered first.
+SORT_LAST = "~"
+
+
+def _in_schema(source: SourceTable, schema: str) -> bool:
+    return (source.schema or source.source_name).casefold() == schema.casefold()
+
+
 def columns_for(
     declaration: Alias,
     ctes: tuple[CTERef, ...],
     models: list[Model],
     sources: list[SourceTable],
+    undocumented: list[SourceTable] = (),
 ) -> tuple[Column, ...]:
     """Columns of the relation an alias is bound to.
 
     `ref_type` records which pattern produced the alias, so "model" and
     "source" name their pool exactly. "cte" is a guess: TABLE_PATTERN matches
-    any bare identifier after FROM/JOIN, which may just as well be a model or
-    source referenced without ref()/source() — hence the extra pools it falls
-    back to.
-    """
-    pools: tuple[list | tuple, ...] = {
-        "model": (models,),
-        "source": (sources,),
-        "cte": (ctes, models, sources),
-    }.get(declaration.ref_type, (ctes, models, sources))
+    any identifier after FROM/JOIN, which may just as well be a model, a
+    source or a warehouse table referenced without ref()/source() — hence the
+    extra pools it falls back to.
 
+    `undocumented` holds warehouse tables the project has no YAML for. They
+    come last everywhere: what the project declares wins.
+    """
     # parse_alias_list lowercases the document, the pools keep the casing they
     # were discovered with, so the comparison has to be case-insensitive.
     wanted = declaration.ref.casefold()
-    for pool in pools:
-        for relation in pool:
-            if relation.name.casefold() == wanted:
-                return relation.columns
-    return ()
+    qualifier = declaration.qualifier
+
+    def named(pool):
+        return [r for r in pool if r.name.casefold() == wanted]
+
+    if declaration.ref_type == "model":
+        found = named(models)
+    elif declaration.ref_type == "source":
+        every = named(sources) + named(undocumented)
+        # The source named in the call; any source with that table otherwise.
+        found = [
+            s
+            for s in every
+            if qualifier and s.source_name.casefold() == qualifier.casefold()
+        ] or every
+    elif qualifier:
+        # `raw.cards`: the table in that schema, else whatever has the name.
+        every = named(sources) + named(undocumented)
+        found = (
+            [s for s in every if _in_schema(s, qualifier)] or named(models) or every
+        )
+    else:
+        found = named(ctes) or named(models) or named(sources)
+        # An undocumented table only when the name points at exactly one.
+        if not found and len(only := named(undocumented)) == 1:
+            found = only
+    return found[0].columns if found else ()
 
 
 def serve_completions(
@@ -553,6 +584,7 @@ def serve_completions(
 ):
     models = state.models
     sources = state.sources
+    undocumented = state.undocumented
     dbt_root = state.dbt_root
 
     # A cursor after the final newline sits on a line `document.lines` does
@@ -608,10 +640,31 @@ def serve_completions(
                 insert_text_format=types.InsertTextFormat.PlainText,
             )
             for s in sources
+        ] + [
+            types.CompletionItem(
+                s.name,
+                kind=types.CompletionItemKind(10),
+                label_details=types.CompletionItemLabelDetails(
+                    description=f"{s.source_name} · {UNDOCUMENTED}"
+                ),
+                insert_text=f"{s.source_name}{quote}, {quote}{s.name}",
+                insert_text_format=types.InsertTextFormat.PlainText,
+                sort_text=SORT_LAST + s.name,
+            )
+            for s in undocumented
         ]
     elif kind == "source_table":
         wanted = info["source"].casefold()
         tables = [s for s in sources if s.source_name.casefold() == wanted]
+        # Tables in the same schema that sources.yml does not list yet. The
+        # typed name is taken as a schema too, for a source with no YAML at all.
+        schemas = {(s.schema or s.source_name).casefold() for s in tables} | {wanted}
+        listed = {(s.identifier or s.name).casefold() for s in tables}
+        extra = [
+            s
+            for s in undocumented
+            if s.schema.casefold() in schemas and s.name.casefold() not in listed
+        ]
         log.info(
             "SOURCE TABLE path matched %r → serving %d tables of %r",
             current_line,
@@ -627,6 +680,14 @@ def serve_completions(
                 ),
             )
             for s in tables
+        ] + [
+            types.CompletionItem(
+                s.name,
+                kind=types.CompletionItemKind(10),
+                label_details=types.CompletionItemLabelDetails(description=UNDOCUMENTED),
+                sort_text=SORT_LAST + s.name,
+            )
+            for s in extra
         ]
     elif kind == "column":
         alias = info["alias"]
@@ -651,8 +712,8 @@ def serve_completions(
 
         # Resolved per request rather than at parse time: the types come from
         # state, which keeps being enriched after a document is first parsed.
-        ctes = resolve_ctes(parsed.ctes, models, sources)
-        columns = columns_for(declaration, ctes, models, sources)
+        ctes = resolve_ctes(parsed.ctes, models, [*sources, *undocumented])
+        columns = columns_for(declaration, ctes, models, sources, undocumented)
         log.info(
             "COLUMN path: alias=%r @ %s → %s %r, %d columns: %s",
             alias,
@@ -673,15 +734,14 @@ def serve_completions(
         ]
     elif kind == "cte":
         parsed = ast_cache.get(document.uri)
-        if parsed is None:
-            log.debug("CTE path: no usable AST for %s", document.uri)
-            return []
-        ctes = parsed.ctes
+        # Warehouse tables do not depend on this file having parsed.
+        ctes = parsed.ctes if parsed is not None else ()
         log.info(
-            "CTE path matched %r → serving %d ctes: %s",
+            "CTE path matched %r → serving %d ctes: %s and %d warehouse tables",
             current_line,
             len(ctes),
             [c.name for c in ctes[:15]],
+            len(undocumented),
         )
         return [
             types.CompletionItem(
@@ -690,6 +750,34 @@ def serve_completions(
                 label_details=types.CompletionItemLabelDetails(description="CTE"),
             )
             for c in ctes
+        ] + [
+            types.CompletionItem(
+                f"{s.schema}.{s.name}",
+                kind=types.CompletionItemKind(22),
+                label_details=types.CompletionItemLabelDetails(
+                    description=WAREHOUSE_TABLE
+                ),
+                sort_text=SORT_LAST + f"{s.schema}.{s.name}",
+            )
+            for s in undocumented
+        ]
+    elif kind == "table":
+        tables = [s for s in undocumented if _in_schema(s, info["schema"])]
+        log.info(
+            "TABLE path matched %r → serving %d tables of schema %r",
+            current_line,
+            len(tables),
+            info["schema"],
+        )
+        return [
+            types.CompletionItem(
+                s.name,
+                kind=types.CompletionItemKind(22),
+                label_details=types.CompletionItemLabelDetails(
+                    description=WAREHOUSE_TABLE
+                ),
+            )
+            for s in tables
         ]
     else:
         log.debug("no pattern matched for %r", current_line)
