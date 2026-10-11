@@ -2,8 +2,11 @@ name: CI
 
 on:
   push:
+    branches:
+      - main
     tags:
       - '0.*'
+  pull_request:
 
 jobs:
   test:

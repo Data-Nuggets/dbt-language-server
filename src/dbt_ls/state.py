@@ -17,6 +17,7 @@ from dbt_ls.model import (
 )
 from dbt_ls.profiles import ProfileTarget
 from dbt_ls.project import Project
+from dbt_ls.report import LoadReport
 from dbt_ls.resolve import compiled_relation_lookup, resolve_cte
 from dbt_ls.scope import dbt_dialect, parse_ast, parse_ctes
 from dbt_ls.source import SourceTable, discover_sources, enrich_sources_from_catalog
@@ -33,10 +34,13 @@ class ProjectState:
     """
 
     project: Project
-    profile_target: ProfileTarget
+    # None when the profile could not be resolved: everything read from disk
+    # still works, only the warehouse is out of reach.
+    profile_target: ProfileTarget | None
     models: list[Model] = field(default_factory=list)
     sources: list[SourceTable] = field(default_factory=list)
     dbt_root: str = "."
+    report: LoadReport = field(default_factory=LoadReport)
 
     def __post_init__(self):
         if not self.models:
@@ -63,6 +67,8 @@ class ProjectState:
             self.reconciliate_models(models)
 
     def refresh_from_database(self):
+        if self.profile_target is None:
+            return
         models, leftover_sources = enrich_models_from_database(
             models=self.models,
             profile_target=self.profile_target,

@@ -99,6 +99,27 @@ In VS Code, use the extension's `dbtLs.serverArgs` setting:
 }
 ~~~
 
+## Checking a project without an editor
+
+`dbt-ls check` loads a project exactly as the server does and prints what each
+schema source returned, so a profile or warehouse connection can be verified
+from a terminal:
+
+~~~sh
+dbt-ls check                      # the project in the current directory
+dbt-ls check path/to/project --schema-sources config,catalog
+dbt-ls check --json               # machine-readable
+dbt-ls check -v                   # also print the server log and tracebacks
+~~~
+
+It exits with `0` when everything loaded, `1` when the project loaded but
+something went wrong (no usable profile, a missing driver, a failed
+connection), and `2` when no `dbt_project.yml` was found.
+
+Model, source and CTE completion do not need a profile or a warehouse. When
+one of those is unavailable the server still starts and reports the reason in
+its progress message; only live column information is missing.
+
 ## Supported backends
 - DuckDB
 - SQL Server / MSSQL
