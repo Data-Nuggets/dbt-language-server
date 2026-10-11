@@ -125,5 +125,10 @@ def resolve_ctes(
     models: Iterable[Model],
     sources: Iterable[SourceTable],
 ) -> tuple[CTERef, ...]:
-    lookup = relation_lookup(models, sources)
-    return tuple(resolve_cte(cte, lookup) for cte in ctes)
+    # In declaration order, each one seeing those before it: a CTE can select
+    # from an earlier CTE, and its `*` and column types come from there.
+    resolved: list[CTERef] = []
+    for cte in ctes:
+        lookup = compiled_relation_lookup(models, sources, resolved)
+        resolved.append(resolve_cte(cte, lookup))
+    return tuple(resolved)

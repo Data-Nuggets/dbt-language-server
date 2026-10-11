@@ -23,7 +23,7 @@ def completion_context(line_prefix: str):
         if m.group("tbl") is not None:
             return ("source_table", {"source": m.group("src")})
         # still in first arg -> completing the source name
-        return ("source_name", {})
+        return ("source_name", {"quote": m.group("q1")})
     if m := REF_RE.search(line_prefix):
         return ("ref", {})
     if m := COLUMN_RE.search(line_prefix):

@@ -11,6 +11,10 @@ class TestNoMatch:
     def test_cursor_outside_any_pattern(self):
         assert complete("sel|ect 1") is None
 
+    def test_cursor_after_the_final_newline(self):
+        # The editor reports a line the document's line list does not contain.
+        assert complete("select 1\n|") is None
+
     def test_bare_string_is_not_a_ref(self):
         assert complete("select '|'", models=[CARDS]) is None
 
@@ -43,6 +47,20 @@ class TestSource:
     def test_insert_text_fills_both_arguments(self):
         items = complete('{{ source("|") }}', sources=[ORACLE])
         assert items[0].insert_text == 'src", "oracle_cards'
+
+    def test_insert_text_matches_a_single_quote(self):
+        items = complete("{{ source('|') }}", sources=[ORACLE])
+        assert items[0].insert_text == "src', 'oracle_cards"
+
+    def test_second_argument_offers_the_tables_of_that_source(self):
+        other = source("other", "ignored")
+        items = complete("{{ source('src', '|') }}", sources=[ORACLE, other])
+        assert labels(items) == ["oracle_cards"]
+        # The source name is already typed, so only the table is inserted.
+        assert items[0].insert_text is None
+
+    def test_second_argument_of_an_unknown_source_offers_nothing(self):
+        assert complete("{{ source('nope', '|') }}", sources=[ORACLE]) == []
 
 
 class TestCte:
@@ -119,3 +137,48 @@ FROM {{ ref("stg_cards") }} c"""
     c.|
 FROM {{ ref("stg_cards") }} c"""
         assert complete(sql, models=[model("stg_cards")]) == []
+
+    def test_alias_written_in_capitals(self):
+        sql = """SELECT
+    C.|
+FROM {{ ref("stg_cards") }} C"""
+        assert labels(complete(sql, models=[CARDS])) == ["card_id", "mana_cost"]
+
+    def test_ref_with_spaces_and_whitespace_control(self):
+        sql = """SELECT
+    c.|
+FROM {{- ref( 'stg_cards' ) -}} c"""
+        assert labels(complete(sql, models=[CARDS])) == ["card_id", "mana_cost"]
+
+    def test_source_with_spaces_inside_the_call(self):
+        sql = """SELECT
+    o.|
+FROM {{ source( 'src' , 'oracle_cards' ) }} o"""
+        assert labels(complete(sql, sources=[ORACLE])) == [
+            "cardmarket_id",
+            "released_at",
+        ]
+
+    def test_star_from_an_earlier_cte_is_expanded(self):
+        sql = """WITH cards AS (
+    SELECT c.card_id, c.mana_cost AS cost FROM {{ ref("stg_cards") }} c
+),
+again AS (
+    SELECT * FROM cards
+)
+SELECT
+    a.|
+FROM again a"""
+        items = complete(sql, models=[CARDS])
+        assert labels(items) == ["card_id", "cost"]
+        # The type travels model -> cards -> again.
+        assert items[1].label_details.description == "INTEGER"
+
+    def test_star_from_an_unknown_relation_is_not_offered(self):
+        sql = """WITH cards AS (
+    SELECT * FROM {{ ref("not_a_model") }}
+)
+SELECT
+    c.|
+FROM cards c"""
+        assert complete(sql, models=[CARDS]) == []

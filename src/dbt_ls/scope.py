@@ -16,6 +16,9 @@ log = logging.getLogger("dbt_ls")
 
 # Placeholder column name for when parsing a mid-edit document
 PLACEHOLDER_COLUMN = "__dbt_ls_incomplete__"
+# Never offered as a completion: the placeholder, and a `*` that could not be
+# expanded because the relation behind it is unknown.
+UNCOMPLETABLE_COLUMNS = frozenset({PLACEHOLDER_COLUMN, "*"})
 
 
 @dataclass(frozen=True)
@@ -221,7 +224,7 @@ class CTERef:
         return tuple(
             Column(name=c.alias or c.name, data_type=c.data_type or None)
             for c in self.selects
-            if (c.alias or c.name) != PLACEHOLDER_COLUMN
+            if (c.alias or c.name) not in UNCOMPLETABLE_COLUMNS
         )
 
 
@@ -236,7 +239,7 @@ class ModelRef:
         return tuple(
             Column(name=c.alias or c.name, data_type=c.data_type or None)
             for c in self.selects
-            if (c.alias or c.name) != PLACEHOLDER_COLUMN
+            if (c.alias or c.name) not in UNCOMPLETABLE_COLUMNS
         )
 
 

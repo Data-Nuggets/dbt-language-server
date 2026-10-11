@@ -18,7 +18,7 @@ from dbt_ls.model import (
 from dbt_ls.profiles import ProfileTarget
 from dbt_ls.project import Project
 from dbt_ls.resolve import compiled_relation_lookup, resolve_cte
-from dbt_ls.scope import dbt_dialect, parse_ast, parse_ctes
+from dbt_ls.scope import dbt_dialect, dialect_for_profile_type, parse_ast, parse_ctes
 from dbt_ls.source import SourceTable, discover_sources, enrich_sources_from_catalog
 
 log = logging.getLogger("dbt_ls")
@@ -78,13 +78,26 @@ class ProjectState:
 
     def refresh_from_run_results(self, result_path: str):
 
-        rr = RunResults.from_fs_path(result_path)
+        try:
+            rr = RunResults.from_fs_path(result_path)
+        except (OSError, ValueError, TypeError) as exc:
+            # dbt rewrites the file in place, so a watcher event can land on a
+            # half-written one.
+            log.warning("Could not read run results at %s: %s", result_path, exc)
+            return
+
+        profile_type = self.profile_target.type if self.profile_target else None
+        dialect = dbt_dialect(dialect_for_profile_type(profile_type))
         models: list[Model] = []
 
         for res in rr.results:
             if res.status != "success" or not (res.compiled_code or "").strip():
                 continue
-            ast = sqlglot.parse_one(res.compiled_code, read=dbt_dialect("postgres"))
+            try:
+                ast = sqlglot.parse_one(res.compiled_code, read=dialect)
+            except Exception:  # noqa: BLE001 — sqlglot raises several unrelated types
+                log.debug("Could not parse compiled code of %s", res.unique_id)
+                continue
 
             resolved = []
             for cte in parse_ctes(ast):
@@ -134,9 +147,11 @@ class ProjectState:
 
 @dataclass
 class RunResult:
-    status: str
-    relation_name: str
-    compiled_code: str
+    # dbt leaves fields out depending on its version and on the node: tests and
+    # seeds have no relation or compiled code, failed nodes may have neither.
+    status: str = ""
+    relation_name: str | None = None
+    compiled_code: str | None = None
     unique_id: str = ""
 
     @classmethod
@@ -152,23 +167,24 @@ class RunResult:
 
     @property
     def model_name(self) -> str:
-        return self.relation_name.split(".")[-1]
+        return (self.relation_name or "").split(".")[-1]
 
 
 @dataclass
 class RunResults:
-    metadata: dict
-    elapsed_time: str
-    args: dict
+    metadata: dict = field(default_factory=dict)
+    elapsed_time: float = 0.0
+    args: dict = field(default_factory=dict)
     results: list[RunResult] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict) -> "RunResults":
         kwargs = {}
+        allowed_fields = {f.name for f in fields(cls)}
         for k, v in data.items():
             if k == "results":
                 kwargs[k] = [RunResult.from_dict(res) for res in v]
-            else:
+            elif k in allowed_fields:
                 kwargs[k] = v
 
         return cls(**kwargs)
