@@ -7,6 +7,13 @@ from dbt_ls.server import Settings, parse_schema_sources, server
 
 
 def main():
+    # `dbt-ls check ...` is the one subcommand; everything else starts the
+    # server, with its flags unchanged for existing editor configs.
+    if sys.argv[1:2] == ["check"]:
+        from dbt_ls.check import main as check
+
+        sys.exit(check(sys.argv[2:]))
+
     banner = f""" ╔═══════════════════════════════════════╗
    ║                                       ║
    ║      _ _     _        _               ║

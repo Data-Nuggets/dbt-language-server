@@ -1,12 +1,14 @@
 import logging
 import os
 import sys
+import time
 import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from uuid import uuid4
 
+import yaml
 from lsprotocol import types
 from pygls.lsp.server import LanguageServer
 from pygls.uris import to_fs_path
@@ -16,10 +18,11 @@ from dbt_ls import __version__
 from dbt_ls.alias import Alias, choose_alias, parse_alias_list
 from dbt_ls.column import Column
 from dbt_ls.exceptions import *
-from dbt_ls.model import Model
+from dbt_ls.model import _DATABASE_METHOD_REGISTRY, Model
 from dbt_ls.pattern import completion_context, ref_model_at
-from dbt_ls.profiles import Profiles
+from dbt_ls.profiles import Profiles, ProfileTarget
 from dbt_ls.project import Project
+from dbt_ls.report import LoadReport, SourceReport
 from dbt_ls.resolve import resolve_ctes
 from dbt_ls.scope import (
     AstCache,
@@ -89,89 +92,188 @@ class DbtLanguageServer(LanguageServer):
 server = DbtLanguageServer()
 
 
-def find_dbt_project_root(root: str) -> str:
+def find_dbt_project_root(root: str) -> str | None:
     # Mirror Neovim's root_markers: first walk UP from the opened path looking
     # for a dbt_project.yml, so opening a subfolder of the project still finds
     # the real root (VS Code sends the opened folder as-is, not the project root).
-    start = Path(root)
+    start = Path(root).resolve()
     for directory in (start, *start.parents):
         if (directory / "dbt_project.yml").is_file():
             return str(directory)
     # Otherwise search downward — e.g. when a parent of the project was opened.
-    for p in Path(root).rglob("dbt_project.yml"):
+    for p in start.rglob("dbt_project.yml"):
         if not IGNORED_DIRS.intersection(p.parts):
             return str(p.parent)
-    return "."
+    return None
+
+
+# The extra that installs the driver for each profile type.
+EXTRA_BY_PROFILE_TYPE = {
+    "duckdb": "duckdb",
+    "postgres": "postgres",
+    "mysql": "mysql",
+    "sqlserver": "sqlserver",
+    "spark": "pyspark",
+    "databricks": "databricks",
+    "athena": "aws",
+    "glue": "aws",
+    "redshift": "aws",
+}
+
+
+def _resolve_profile_target(
+    project: Project, report: LoadReport
+) -> ProfileTarget | None:
+    """The active profile target, or None with the reason left on `report`.
+
+    Never raises: a project without a usable profile still has models, sources
+    and documented columns to offer, so a profile problem only costs the
+    warehouse.
+    """
+    report.profile_name = project.profile
+    if not project.profile:
+        report.profile_problem = "dbt_project.yml has no `profile:` key"
+        return None
+
+    try:
+        profiles = Profiles.locate(project.root)
+    except (OSError, yaml.YAMLError) as exc:
+        report.profile_problem = f"could not read profiles.yml: {exc}"
+        return None
+    if profiles is None:
+        report.profile_problem = f"no profiles.yml in {project.root} or ~/.dbt"
+        return None
+    report.profile_path = str(profiles.path)
+
+    try:
+        target = profiles.resolve(project.profile)
+    except (EnvVarError, ProfileTargetError) as exc:
+        report.profile_problem = str(exc)
+    except (KeyError, TypeError) as exc:
+        report.profile_problem = (
+            f"profile {project.profile!r} has no usable target in "
+            f"{profiles.path} (missing {exc})"
+        )
+    else:
+        report.profile_type = target.type
+        return target
+    return None
+
+
+def _missing_dependency(exc: ImportError) -> str:
+    # ibis wraps the real ModuleNotFoundError in its own ImportError, so walk
+    # the cause chain to find the name of the package actually missing.
+    err: BaseException | None = exc
+    while err is not None:
+        if isinstance(err, ImportError) and err.name:
+            return err.name
+        err = err.__cause__ or err.__context__
+    return "unknown"
+
+
+def _run_source(source: SchemaSource, state: ProjectState) -> SourceReport:
+    """Run one schema source and say how it went. Never raises."""
+    target = state.profile_target
+    report = SourceReport(source=source.value, outcome="ok")
+
+    if source is SchemaSource.CATALOG:
+        catalog_path = Path(state.dbt_root) / "target" / "catalog.json"
+        if not catalog_path.is_file():
+            report.outcome = "skipped"
+            report.detail = "no target/catalog.json (run `dbt docs generate`)"
+    elif source is SchemaSource.DATABASE:
+        if target is None:
+            report.outcome = "failed"
+            report.detail = "no profile target to connect with"
+        elif target.type not in _DATABASE_METHOD_REGISTRY:
+            report.outcome = "skipped"
+            report.detail = f"no warehouse reader for profile type {target.type!r}"
+
+    if report.outcome == "ok":
+        refresh = {
+            SchemaSource.CONFIG: state.refresh_from_config,
+            SchemaSource.CATALOG: state.refresh_from_catalog,
+            SchemaSource.DATABASE: state.refresh_from_database,
+        }[source]
+        started = time.perf_counter()
+        try:
+            refresh()
+        except ImportError as exc:
+            extra = EXTRA_BY_PROFILE_TYPE.get(target.type if target else "", "all")
+            report.outcome = "failed"
+            report.detail = (
+                f"missing package {_missing_dependency(exc)!r}; "
+                f"install dbt-ls[{extra}]"
+            )
+        except AWSLoginRequiredError:
+            report.outcome = "failed"
+            report.detail = "AWS login required"
+        except Exception as exc:  # noqa: BLE001 — a source must never end the load
+            log.exception("%s enrichment failed; continuing without it", source.value)
+            report.outcome = "failed"
+            report.detail = f"{type(exc).__name__}: {exc}".splitlines()[0]
+        report.seconds = time.perf_counter() - started
+
+    if report.outcome == "ok":
+        log.info("Finished parsing column info from %s", source.value)
+    else:
+        log.warning("%s enrichment %s: %s", source.value, report.outcome, report.detail)
+
+    report.models_with_columns = sum(1 for m in state.models if m.columns)
+    report.models_with_types = sum(
+        1 for m in state.models if any(c.data_type for c in m.columns)
+    )
+    report.sources_with_columns = sum(1 for s in state.sources if s.columns)
+    return report
 
 
 def _load_project(root_path: str | None, settings: Settings) -> ProjectState:
+    """Build the project state. Raises only when there is no project to load.
 
+    Anything short of that — no profile, a missing driver, a warehouse that
+    refuses the connection — is recorded on `state.report` and the load goes
+    on with whatever it could get.
+    """
     if not root_path:
         log.warning("Initialize received no root_path; skipping project discovery")
-        raise NoRootPathError
+        raise NoRootPathError("no workspace folder was opened")
 
     dbt_root = find_dbt_project_root(root_path)
     if not dbt_root:
         log.warning("No dbt project root found under %s; skipping discovery", root_path)
-        raise NoDbtRootError
+        raise NoDbtRootError(f"no dbt_project.yml at, above or under {root_path}")
     log.info("Resolved dbt project root: %s (from opened path %s)", dbt_root, root_path)
 
-    project = Project(dbt_root)
+    try:
+        project = Project(dbt_root)
+    except (OSError, yaml.YAMLError) as exc:
+        raise NoDbtRootError(f"could not read {dbt_root}/dbt_project.yml: {exc}")
     log.info(
         "Project %r uses profile %r", project.config.get("name", ""), project.profile
     )
 
-    # ProjectState requires a resolved profile target up front, so resolve the
-    # profile before constructing it.
-    profile = Profiles.locate(project.root)
-    if not profile:
-        log.info("No dbt profile located; skipping database enrichment")
-        raise NoDbtProfileError
-
-    if not project.profile:
-        log.info("dbt_project.yml has no `profile:` key; skipping database enrichment")
-        raise NoDbtProfileTargetError
-
-    try:
-        profile_target = profile.resolve(project.profile)
-    except EnvVarError as e:
-        log.error("Environment variable not set for profile %r", project.profile)
-        raise NoDbtProfileTargetError from e
-    except ProfileTargetError:
-        log.exception("Could not build a target for profile %r", project.profile)
-        raise
-    except KeyError as e:
-        log.error(
-            "Profile %r has no matching profile/target %s in profiles.yml",
-            project.profile,
-            e,
-        )
-        raise NoDbtProfileTargetError from e
+    report = LoadReport()
+    profile_target = _resolve_profile_target(project, report)
+    if profile_target is None:
+        log.warning("No profile target: %s", report.profile_problem)
     else:
-        if not profile_target:
-            log.info(
-                "Profile %r resolved to an empty target; skipping database enrichment",
-                project.profile,
-            )
-            raise NoDbtProfileTargetError
         log.info("Using profile: %s", profile_target)
+    # Without a profile there is no adapter to name the dialect; postgres is
+    # the closest thing to plain SQL.
+    report.dialect = dialect_for_profile_type(report.profile_type or None)
 
     # __post_init__ discovers documented models and sources from `dbt_root`.
     state = ProjectState(
         project=project,
         profile_target=profile_target,
         dbt_root=dbt_root,
+        report=report,
     )
     log.debug("Finished parsing documented models and sources")
 
     # Column enrichment. Each source is run in ascending priority order, so the
     # last one that yields columns for a model is the one that wins. A source
     # left out of `schema_sources` is never run at all
-    refreshers = {
-        SchemaSource.CONFIG: state.refresh_from_config,
-        SchemaSource.CATALOG: state.refresh_from_catalog,
-        SchemaSource.DATABASE: state.refresh_from_database,
-    }
     if not settings.schema_sources:
         log.warning("No schema sources enabled; models will have no column info")
     else:
@@ -179,35 +281,7 @@ def _load_project(root_path: str | None, settings: Settings) -> ProjectState:
 
     for source in settings.schema_sources:
         log.debug("Enriching from %s", source.value)
-        try:
-            refreshers[source]()
-        except ImportError as exc:
-            # ibis wraps the real ModuleNotFoundError in its own ImportError, so
-            # walk the cause chain to find the name of the package actually missing.
-            missing = "unknown"
-            err: BaseException | None = exc
-            while err is not None:
-                if isinstance(err, ImportError) and err.name:
-                    missing = err.name
-                    break
-                err = err.__cause__ or err.__context__
-            log.warning(
-                "%s enrichment skipped: missing dependency %r (%s). "
-                "Install the matching extra, e.g. `pip install dbt-ls[postgres]`, "
-                "then restart. Continuing with documented models only.",
-                source.value,
-                missing,
-                exc,
-            )
-            # Surfaced by load_project as a "missing dependency" progress message.
-            raise
-        except AWSLoginRequiredError:
-            log.error("AWS login required")
-            raise
-        except Exception:  # noqa: BLE001 — enrichment must never crash initialize
-            log.exception("%s enrichment failed; continuing without it", source.value)
-        else:
-            log.info("Finished parsing column info from %s", source.value)
+        report.sources.append(_run_source(source, state))
 
     return state
 
@@ -216,11 +290,12 @@ def load_project(ls: DbtLanguageServer):
 
     # Progress report setup
     token = "reload-project" + str(uuid.uuid4())
-
-    if (
+    reports_progress = bool(
         ls.client_capabilities.window
         and ls.client_capabilities.window.work_done_progress
-    ):
+    )
+
+    if reports_progress:
         ls.work_done_progress.create(token)
         ls.work_done_progress.begin(
             token,
@@ -229,35 +304,22 @@ def load_project(ls: DbtLanguageServer):
             ),
         )
 
+    def finish(message: str):
+        if reports_progress:
+            ls.work_done_progress.end(token, types.WorkDoneProgressEnd(message=message))
+
     try:
         ls.state = _load_project(ls.workspace.root_path, ls.settings)
-    except NoDbtProfileError:
-        ls.work_done_progress.end(
-            token, types.WorkDoneProgressEnd(message="❌No profile found")
-        )
+    except (NoRootPathError, NoDbtRootError) as exc:
+        finish(f"❌{exc}")
         return
-    except NoDbtProfileTargetError:
-        ls.work_done_progress.end(
-            token, types.WorkDoneProgressEnd(message="❌Target empty")
-        )
-        return
-    except ProfileTargetError as e:
-        ls.work_done_progress.end(
-            token, types.WorkDoneProgressEnd(message=f"❌{e}")
-        )
-        return
-    except ImportError:
-        ls.work_done_progress.end(
-            token, types.WorkDoneProgressEnd(message="❌Missing dependency (see logs)")
-        )
-    except AWSLoginRequiredError:
-        ls.work_done_progress.end(
-            token, types.WorkDoneProgressEnd(message="❌AWS login required")
-        )
-    else:
-        # Now that the profile is known, parse in the adapter's own dialect.
-        ls.ast_cache.dialect = dialect_for_profile_type(ls.state.profile_target.type)
-        ls.work_done_progress.end(token, types.WorkDoneProgressEnd(message="Finished"))
+
+    # Parse in the adapter's own dialect now that it is known.
+    ls.ast_cache.dialect = ls.state.report.dialect
+    problems = ls.state.report.problems
+    # Models and sources are loaded either way; a problem only means fewer
+    # columns, so it is a warning rather than the old all-or-nothing ❌.
+    finish(f"⚠️{problems[0]}" if problems else "Finished")
 
 
 @server.feature(types.WORKSPACE_DID_CHANGE_WATCHED_FILES)
