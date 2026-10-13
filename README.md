@@ -15,7 +15,7 @@
 | Config enrichment | on `initialize` | Reads documented columns from the hand-written `schema.yml` files. |
 | Catalog enrichment | on `initialize` | Reads model and source column info from `target/catalog.json` when available. |
 | Database enrichment | in the background after `initialize` | Reads column names and data types for models and sources directly from the connected warehouse. |
-| Profile resolution | on `initialize` | Locates the dbt profile, resolves the active target    |
+| Profile resolution | on `initialize` | Locates the dbt profile (`--profiles-dir`, `DBT_PROFILES_DIR`, the project root, `~/.dbt`) and resolves the active target |
 | Auto project discovery | on `initialize` | Finds the dbt project root by locating `dbt_project.yml` (ignoring `target/`). |
 | Project reload | `dbt-ls.reload` command | Re-discovers models, sources, and re-runs enrichment without restarting the server. |
 | Current model info | `dbt-ls.current_model` command | Returns the dbt project root and the model's execution path for the current file. (Can be used to run models)   |
@@ -105,6 +105,36 @@ In VS Code, use the extension's `dbtLs.serverArgs` setting:
   "dbtLs.serverArgs": ["--schema-sources", "config,catalog"]
 }
 ~~~
+
+## Finding profiles.yml
+
+The server looks for `profiles.yml` where dbt does, in the same order:
+
+1. the directory given with `--profiles-dir`
+2. the directory in the `DBT_PROFILES_DIR` environment variable
+3. the project root
+4. `~/.dbt`
+
+A directory named by the flag or the variable is the only one searched. If it
+holds no `profiles.yml` the server says so instead of quietly using another
+one, so completions never come from a different warehouse than `dbt run` uses.
+
+An editor started from the dock does not see a variable exported in your
+shell. Pass the flag there instead:
+
+~~~lua
+cmd = { "dbt-ls", "--profiles-dir", "/path/to/profiles" },
+~~~
+
+~~~json
+{
+  "dbtLs.serverArgs": ["--profiles-dir", "/path/to/profiles"]
+}
+~~~
+
+`dbt-ls check` prints the `profiles.yml` it used. When the flag or the
+variable points away from a project that has its own `profiles.yml`, `check`
+adds a note and the server logs a warning that the project's file is not used.
 
 ## Tables without YAML
 

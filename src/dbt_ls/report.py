@@ -31,6 +31,8 @@ class LoadReport:
     profile_type: str = ""
     # Why there is no usable profile target. Empty when there is one.
     profile_problem: str = ""
+    # Worth knowing about the profile lookup, but nothing went wrong.
+    profile_note: str = ""
     dialect: str = ""
     sources: list[SourceReport] = field(default_factory=list)
 

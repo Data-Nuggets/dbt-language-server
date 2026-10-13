@@ -305,24 +305,32 @@ class Profiles:
         return f"DBT Profile at {self.path}"
 
     @classmethod
-    def locate(cls, project_root: str) -> "Profiles | None":
-        candidate = cls._search_dirs(project_root)
-        if not candidate:
-            return None
-        if candidate.exists():
-            return cls(candidate)
+    def locate(
+        cls, project_root: str, profiles_dir: str | None = None
+    ) -> "Profiles | None":
+        dirs, _ = cls.search_dirs(project_root, profiles_dir)
+        for directory in dirs:
+            candidate = directory / "profiles.yml"
+            if candidate.exists():
+                return cls(candidate)
 
         return None
 
     @staticmethod
-    def _search_dirs(project_root: str) -> Path | None:
-        profile_paths = [Path(project_root), Path.home().joinpath(".dbt")]
+    def search_dirs(
+        project_root: str, profiles_dir: str | None = None
+    ) -> tuple[list[Path], str | None]:
+        """Where profiles.yml is looked for, in dbt's own order, and what named it.
 
-        for profile_path in profile_paths:
-            if Path(profile_path.joinpath("profiles.yml")).exists():
-                return Path(profile_path.joinpath("profiles.yml"))
-
-        return None
+        A directory given by `--profiles-dir` or `DBT_PROFILES_DIR` is the only
+        one searched, as in dbt: falling back to the project or ~/.dbt would
+        read a different warehouse than `dbt run` does.
+        """
+        if profiles_dir:
+            return [Path(profiles_dir).expanduser()], "--profiles-dir"
+        if from_env := os.environ.get("DBT_PROFILES_DIR"):
+            return [Path(from_env).expanduser()], "DBT_PROFILES_DIR"
+        return [Path(project_root), Path.home() / ".dbt"], None
 
     def resolve(self, profile_name: str, target: str | None = None) -> ProfileTarget:
         if not target:

@@ -27,6 +27,7 @@ def project(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.delenv("DBT_PROFILES_DIR", raising=False)
 
     root = tmp_path / "proj"
     (root / "models").mkdir(parents=True)
@@ -111,6 +112,77 @@ class TestProfileProblems:
         assert outcomes(state) == {"config": "ok"}
         # The profile problem is still stated, it just cost nothing here.
         assert state.report.problems == [f"profile: {state.report.profile_problem}"]
+
+
+class TestProfilesDir:
+    """profiles.yml is found the way dbt finds it."""
+
+    @pytest.fixture
+    def elsewhere(self, tmp_path):
+        directory = tmp_path / "elsewhere"
+        directory.mkdir()
+        (directory / "profiles.yml").write_text(DUCKDB_PROFILE)
+        return directory
+
+    def test_env_var_names_the_directory(self, project, elsewhere, monkeypatch):
+        monkeypatch.setenv("DBT_PROFILES_DIR", str(elsewhere))
+        state = load(project, "config")
+        assert state.report.profile_problem == ""
+        assert state.report.profile_path == str(elsewhere / "profiles.yml")
+
+    def test_env_var_wins_over_the_project(self, project, elsewhere, monkeypatch):
+        (project / "profiles.yml").write_text("other:\n  target: dev\n  outputs: {}\n")
+        monkeypatch.setenv("DBT_PROFILES_DIR", str(elsewhere))
+        state = load(project, "config")
+        assert state.report.profile_path == str(elsewhere / "profiles.yml")
+        assert state.report.profile_note == (
+            f"{project / 'profiles.yml'} is not used: DBT_PROFILES_DIR is {elsewhere}"
+        )
+        # A note, not a problem: this is what dbt does too.
+        assert state.report.ok
+
+    def test_no_note_without_a_profile_in_the_project(
+        self, project, elsewhere, monkeypatch
+    ):
+        monkeypatch.setenv("DBT_PROFILES_DIR", str(elsewhere))
+        assert load(project, "config").report.profile_note == ""
+
+    def test_no_note_when_the_project_is_the_named_directory(
+        self, project, monkeypatch
+    ):
+        (project / "profiles.yml").write_text(DUCKDB_PROFILE)
+        monkeypatch.setenv("DBT_PROFILES_DIR", str(project))
+        assert load(project, "config").report.profile_note == ""
+
+    def test_flag_wins_over_the_env_var(self, project, elsewhere, monkeypatch):
+        monkeypatch.setenv("DBT_PROFILES_DIR", str(project / "nowhere"))
+        settings = Settings(
+            schema_sources=parse_schema_sources("config"),
+            profiles_dir=str(elsewhere),
+        )
+        state = _load_project(str(project), settings)
+        assert state.report.profile_path == str(elsewhere / "profiles.yml")
+
+    def test_a_named_directory_is_the_only_one_searched(self, project, monkeypatch):
+        # As in dbt: falling back would read another warehouse than `dbt run`.
+        (project / "profiles.yml").write_text(DUCKDB_PROFILE)
+        monkeypatch.setenv("DBT_PROFILES_DIR", str(project / "nowhere"))
+        state = load(project, "config")
+        assert state.report.profile_problem == (
+            f"no profiles.yml in {project / 'nowhere'} (from DBT_PROFILES_DIR)"
+        )
+        assert "is not used" in state.report.profile_note
+
+    def test_an_empty_env_var_is_ignored(self, project, monkeypatch):
+        (project / "profiles.yml").write_text(DUCKDB_PROFILE)
+        monkeypatch.setenv("DBT_PROFILES_DIR", "")
+        state = load(project, "config")
+        assert state.report.profile_path == str(project / "profiles.yml")
+
+    def test_check_takes_the_flag(self, project, elsewhere, capsys):
+        args = [str(project), "--schema-sources", "config"]
+        assert check.main(args + ["--profiles-dir", str(elsewhere)]) == 0
+        assert str(elsewhere / "profiles.yml") in capsys.readouterr().out
 
 
 class TestSourceProblems:

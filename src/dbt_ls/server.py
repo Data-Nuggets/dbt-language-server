@@ -60,6 +60,9 @@ class Settings:
     # Ascending priority: the last source that yields columns wins.
     # Absent == disabled, so ("config",) never touches the warehouse.
     schema_sources: tuple[SchemaSource, ...] = tuple(SchemaSource)
+    # Where profiles.yml is; None leaves it to DBT_PROFILES_DIR, then the
+    # project root, then ~/.dbt.
+    profiles_dir: str | None = None
 
 
 def parse_schema_sources(raw: str) -> tuple[SchemaSource, ...]:
@@ -131,7 +134,7 @@ EXTRA_BY_PROFILE_TYPE = {
 
 
 def _resolve_profile_target(
-    project: Project, report: LoadReport
+    project: Project, report: LoadReport, profiles_dir: str | None = None
 ) -> ProfileTarget | None:
     """The active profile target, or None with the reason left on `report`.
 
@@ -145,12 +148,26 @@ def _resolve_profile_target(
         return None
 
     try:
-        profiles = Profiles.locate(project.root)
+        profiles = Profiles.locate(project.root, profiles_dir)
     except (OSError, yaml.YAMLError) as exc:
         report.profile_problem = f"could not read profiles.yml: {exc}"
         return None
+    dirs, named_by = Profiles.search_dirs(project.root, profiles_dir)
+    passed_over = Path(project.root) / "profiles.yml"
+    # The lookup is dbt's, but an editor opened in the project makes it easy
+    # to expect the file lying there.
+    if (
+        named_by
+        and passed_over.exists()
+        and passed_over.parent.resolve() != dirs[0].resolve()
+    ):
+        report.profile_note = f"{passed_over} is not used: {named_by} is {dirs[0]}"
+        log.warning(report.profile_note)
     if profiles is None:
-        report.profile_problem = f"no profiles.yml in {project.root} or ~/.dbt"
+        if named_by:
+            report.profile_problem = f"no profiles.yml in {dirs[0]} (from {named_by})"
+        else:
+            report.profile_problem = f"no profiles.yml in {project.root} or ~/.dbt"
         return None
     report.profile_path = str(profiles.path)
 
@@ -236,7 +253,9 @@ def _run_source(source: SchemaSource, state: ProjectState) -> SourceReport:
     return report
 
 
-def _open_project(root_path: str | None) -> ProjectState:
+def _open_project(
+    root_path: str | None, profiles_dir: str | None = None
+) -> ProjectState:
     """Find the project and what it declares. No schema source has run yet.
 
     Raises only when there is no project to load. Anything short of that — no
@@ -262,7 +281,7 @@ def _open_project(root_path: str | None) -> ProjectState:
     )
 
     report = LoadReport()
-    profile_target = _resolve_profile_target(project, report)
+    profile_target = _resolve_profile_target(project, report, profiles_dir)
     if profile_target is None:
         log.warning("No profile target: %s", report.profile_problem)
     else:
@@ -295,7 +314,7 @@ def _run_sources(state: ProjectState, sources: tuple[SchemaSource, ...]) -> None
 
 def _load_project(root_path: str | None, settings: Settings) -> ProjectState:
     """Build the whole project state, warehouse included, before returning."""
-    state = _open_project(root_path)
+    state = _open_project(root_path, settings.profiles_dir)
     if not settings.schema_sources:
         log.warning("No schema sources enabled; models will have no column info")
     else:
@@ -379,7 +398,7 @@ def load_project(ls: DbtLanguageServer):
     from_disk, from_warehouse = _split_at_warehouse(settings.schema_sources)
 
     try:
-        state = _open_project(ls.workspace.root_path)
+        state = _open_project(ls.workspace.root_path, settings.profiles_dir)
     except (NoRootPathError, NoDbtRootError) as exc:
         finish(f"❌{exc}")
         return

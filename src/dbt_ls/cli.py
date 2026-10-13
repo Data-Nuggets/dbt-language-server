@@ -53,13 +53,21 @@ def main():
         "entirely, e.g. `--schema-sources config,catalog` never connects to "
         "the warehouse. (default: %(default)s)",
     )
+    p.add_argument(
+        "--profiles-dir",
+        metavar="DIR",
+        help="Directory holding profiles.yml. Overrides DBT_PROFILES_DIR; "
+        "without either, the project root and then ~/.dbt are searched.",
+    )
     args = p.parse_args()
 
     try:
         schema_sources = parse_schema_sources(args.schema_sources)
     except ValueError as e:
         p.error(str(e))
-    server.settings = Settings(schema_sources=schema_sources)
+    server.settings = Settings(
+        schema_sources=schema_sources, profiles_dir=args.profiles_dir
+    )
 
     if args.tcp:
         server.start_tcp(args.host, args.port)

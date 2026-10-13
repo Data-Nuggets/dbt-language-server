@@ -88,6 +88,10 @@ def render(state: ProjectState) -> str:
         more = f", and {len(bare) - MAX_LISTED} more" if len(bare) > MAX_LISTED else ""
         lines.append(f"  {listed}{more}")
 
+    if report.profile_note:
+        lines.append("")
+        lines.append(f"note: {report.profile_note}")
+
     lines.append("")
     lines.append("result: ok" if report.ok else "result: problems found")
     lines += [f"  {problem}" for problem in report.problems]
@@ -127,6 +131,12 @@ def main(argv: list[str]) -> int:
         metavar="SOURCE[,SOURCE...]",
         help="same meaning as for the server (default: %(default)s)",
     )
+    p.add_argument(
+        "--profiles-dir",
+        metavar="DIR",
+        help="same meaning as for the server (default: DBT_PROFILES_DIR, then "
+        "the project, then ~/.dbt)",
+    )
     p.add_argument("--json", action="store_true", help="print the report as JSON")
     p.add_argument(
         "-v",
@@ -137,7 +147,10 @@ def main(argv: list[str]) -> int:
     args = p.parse_args(argv)
 
     try:
-        settings = Settings(schema_sources=parse_schema_sources(args.schema_sources))
+        settings = Settings(
+            schema_sources=parse_schema_sources(args.schema_sources),
+            profiles_dir=args.profiles_dir,
+        )
     except ValueError as e:
         p.error(str(e))
 
