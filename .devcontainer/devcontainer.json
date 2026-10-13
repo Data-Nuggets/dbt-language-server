@@ -1,0 +1,52 @@
+// .devcontainer/devcontainer.json
+{
+  "name": "dbt-language-server",
+  "image": "mcr.microsoft.com/devcontainers/python:3.12-bookworm",
+
+  "features": {
+    // Docker for the Postgres / MySQL / SQL Server test containers
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {},
+    // gh CLI for PRs from the terminal
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+
+  // 2-core is enough for unit tests; bump to 4 if you run all three DB containers at once
+  "hostRequirements": { "cpus": 2, "memory": "8gb" },
+
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+
+  // Survive codespace rebuilds without re-logging into Claude Code
+  "mounts": [
+    "source=claude-config,target=/home/vscode/.claude,type=volume"
+  ],
+
+  "remoteEnv": {
+    // Optional: set ANTHROPIC_API_KEY as a Codespaces user secret instead of OAuth login
+    "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}"
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "charliermarsh.ruff",
+        "anthropic.claude-code"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python"
+      }
+    }
+  }
+}
+
+// --- .devcontainer/post-create.sh ---
+// #!/usr/bin/env bash
+// set -euo pipefail
+// sudo chown -R vscode:vscode /home/vscode/.claude
+// pipx install hatch
+// hatch env create
+// curl -fsSL https://claude.ai/install.sh | bash   # Claude Code native installer
+//
+// # Optional: VHS for demo tapes
+// # sudo apt-get update && sudo apt-get install -y ffmpeg
+// # go install github.com/charmbracelet/vhs@latest  (needs the go feature + ttyd)
