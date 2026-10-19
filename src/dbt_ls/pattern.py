@@ -40,11 +40,38 @@ def completion_context(line_prefix: str):
     return None
 
 
+def ref_at(line: str, character: int) -> re.Match | None:
+    """The ref('model') call whose model name the cursor is on."""
+    for m in REF_FULL_RE.finditer(line):
+        if m.start("model") <= character <= m.end("model"):
+            return m
+    return None
+
+
 def ref_model_at(line: str, character: int) -> str | None:
     """
     Check if cursor is on a model
     """
-    for m in REF_FULL_RE.finditer(line):
-        if m.start("model") <= character <= m.end("model"):
-            return m.group("model")
+    m = ref_at(line, character)
+    return m.group("model") if m else None
+
+
+def source_at(line: str, character: int) -> re.Match | None:
+    """The source('src', 'table') call the cursor is on, on either argument."""
+    for m in SOURCE_FULL_RE.finditer(line):
+        if m.start("source") <= character <= m.end("table"):
+            return m
+    return None
+
+
+# `alias.column` anywhere on a line. Unlike COLUMN_RE it is not anchored to
+# the cursor, so it finds a reference the cursor is in the middle of.
+DOTTED_RE = re.compile(r"\b(?P<alias>[a-zA-Z_]\w*)\.(?P<column>[a-zA-Z_]\w*)")
+
+
+def dotted_at(line: str, character: int) -> re.Match | None:
+    """The `alias.column` the cursor is on, on either name."""
+    for m in DOTTED_RE.finditer(line):
+        if m.start() <= character <= m.end():
+            return m
     return None

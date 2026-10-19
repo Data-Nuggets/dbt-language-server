@@ -18,11 +18,18 @@ from pygls.uris import to_fs_path
 from pygls.workspace import TextDocument
 
 from dbt_ls import __version__
+from dbt_ls import hover as hover_text
 from dbt_ls.alias import Alias, choose_alias, parse_alias_list
 from dbt_ls.column import Column
 from dbt_ls.exceptions import *
 from dbt_ls.model import _DATABASE_METHOD_REGISTRY, Model
-from dbt_ls.pattern import completion_context, ref_model_at
+from dbt_ls.pattern import (
+    completion_context,
+    dotted_at,
+    ref_at,
+    ref_model_at,
+    source_at,
+)
 from dbt_ls.profiles import Profiles, ProfileTarget
 from dbt_ls.project import Project
 from dbt_ls.report import LoadReport, SourceReport
@@ -552,7 +559,19 @@ def columns_for(
     sources: list[SourceTable],
     undocumented: list[SourceTable] = (),
 ) -> tuple[Column, ...]:
-    """Columns of the relation an alias is bound to.
+    """Columns of the relation an alias is bound to."""
+    found = relation_for(declaration, ctes, models, sources, undocumented)
+    return found.columns if found else ()
+
+
+def relation_for(
+    declaration: Alias,
+    ctes: tuple[CTERef, ...],
+    models: list[Model],
+    sources: list[SourceTable],
+    undocumented: list[SourceTable] = (),
+) -> CTERef | Model | SourceTable | None:
+    """The relation an alias is bound to.
 
     `ref_type` records which pattern produced the alias, so "model" and
     "source" name their pool exactly. "cte" is a guess: TABLE_PATTERN matches
@@ -592,7 +611,23 @@ def columns_for(
         # An undocumented table only when the name points at exactly one.
         if not found and len(only := named(undocumented)) == 1:
             found = only
-    return found[0].columns if found else ()
+    return found[0] if found else None
+
+
+def declaration_at(
+    document: TextDocument, parsed, alias: str, pos: types.Position
+) -> Alias | None:
+    """The declaration of `alias` in scope at `pos`, from the last good parse."""
+    # Block spans are offsets into `parsed.source`, so they have to be
+    # resolved against that text rather than the live buffer.
+    return choose_alias(
+        # Alias.line_number is 1-based, LSP Position.line is 0-based.
+        cur_pos=Position(pos.line + 1, pos.character),
+        aliases=parse_alias_list(document.source),
+        alias=alias,
+        blocks=query_blocks(parsed.ast),
+        sql=parsed.source,
+    )
 
 
 def serve_completions(
@@ -716,15 +751,7 @@ def serve_completions(
         if parsed is None:
             log.debug("COLUMN path: no usable AST for %s", document.uri)
             return []
-        # Block spans are offsets into `parsed.source`, so they have to be
-        # resolved against that text rather than the live buffer.
-        declaration = choose_alias(
-            cur_pos=Position(cursor[0], cursor[1]),
-            aliases=parse_alias_list(document.source),
-            alias=alias,
-            blocks=query_blocks(parsed.ast),
-            sql=parsed.source,
-        )
+        declaration = declaration_at(document, parsed, alias, pos)
         if declaration is None:
             log.debug("COLUMN path: alias=%r @ %s is not in scope", alias, cursor)
             return []
@@ -843,3 +870,100 @@ def definition(ls: DbtLanguageServer, params: types.DefinitionParams):
         uri=Path(target.path).as_uri(),
         range=types.Range(start=start, end=start),
     )
+
+
+def serve_hover(
+    state: ProjectState,
+    document: TextDocument,
+    ast_cache: AstCache,
+    pos: types.Position,
+) -> types.Hover | None:
+    """What the ref, source or `alias.column` under the cursor points at."""
+    line = document.lines[pos.line] if pos.line < len(document.lines) else ""
+
+    def answer(markdown: str, start: int, end: int) -> types.Hover:
+        return types.Hover(
+            contents=types.MarkupContent(
+                kind=types.MarkupKind.Markdown, value=markdown
+            ),
+            range=types.Range(
+                start=types.Position(line=pos.line, character=start),
+                end=types.Position(line=pos.line, character=end),
+            ),
+        )
+
+    if found := ref_at(line, pos.character):
+        wanted = found.group("model").casefold()
+        model = next((m for m in state.models if m.name.casefold() == wanted), None)
+        if model is None:
+            return None
+        return answer(
+            hover_text.relation_hover(model, dbt_root=state.dbt_root),
+            *found.span("model"),
+        )
+
+    if found := source_at(line, pos.character):
+        source_name = found.group("source").casefold()
+        table = found.group("table").casefold()
+
+        def named(s: SourceTable) -> bool:
+            return (
+                s.source_name.casefold() == source_name
+                and s.name.casefold() == table
+            )
+
+        relation = next(filter(named, state.sources), None)
+        undocumented = relation is None
+        if undocumented:
+            relation = next(filter(named, state.undocumented), None)
+        if relation is None:
+            return None
+        return answer(
+            hover_text.relation_hover(
+                relation, dbt_root=state.dbt_root, undocumented=undocumented
+            ),
+            found.start("source"),
+            found.end("table"),
+        )
+
+    if m := dotted_at(line, pos.character):
+        parsed = ast_cache.get(document.uri)
+        if parsed is None:
+            return None
+        alias_pos = types.Position(line=pos.line, character=m.start("alias"))
+        declaration = declaration_at(document, parsed, m.group("alias"), alias_pos)
+        if declaration is None:
+            return None
+        ctes = resolve_ctes(
+            parsed.ctes, state.models, [*state.sources, *state.undocumented]
+        )
+        relation = relation_for(
+            declaration, ctes, state.models, state.sources, state.undocumented
+        )
+        if relation is None:
+            return None
+        undocumented = any(relation is s for s in state.undocumented)
+        if pos.character <= m.end("alias"):
+            return answer(
+                hover_text.relation_hover(
+                    relation, dbt_root=state.dbt_root, undocumented=undocumented
+                ),
+                m.start("alias"),
+                m.end("alias"),
+            )
+        return answer(
+            hover_text.column_hover(
+                m.group("column"), relation, undocumented=undocumented
+            ),
+            m.start("column"),
+            m.end("column"),
+        )
+    return None
+
+
+@server.feature(types.TEXT_DOCUMENT_HOVER)
+def hover(ls: DbtLanguageServer, params: types.HoverParams):
+    if ls.state is None:
+        return None
+    document = ls.workspace.get_text_document(params.text_document.uri)
+    return serve_hover(ls.state, document, ls.ast_cache, params.position)
