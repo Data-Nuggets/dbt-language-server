@@ -6,7 +6,7 @@ from pygls.workspace import TextDocument
 from dbt_ls.column import Column
 from dbt_ls.model import Model
 from dbt_ls.scope import AstCache
-from dbt_ls.server import serve_completions
+from dbt_ls.server import serve_completions, serve_hover
 from dbt_ls.source import SourceTable
 from dbt_ls.state import ProjectState
 
@@ -58,12 +58,29 @@ def complete(
     dialect: str = "duckdb",
 ) -> list[types.CompletionItem] | None:
     """Run completion on `text` at its `|` marker."""
+    return serve_completions(*_request(text, models, sources, undocumented, dialect))
+
+
+def hover(
+    text: str,
+    *,
+    models: list[Model] | None = None,
+    sources: list[SourceTable] | None = None,
+    undocumented: list[SourceTable] | None = None,
+    dialect: str = "duckdb",
+) -> types.Hover | None:
+    """Run hover on `text` at its `|` marker."""
+    return serve_hover(*_request(text, models, sources, undocumented, dialect))
+
+
+def _request(text, models, sources, undocumented, dialect):
+    """State, document, AST cache and position for a handler call."""
     src, pos = split_cursor(text)
 
     document = TextDocument(uri=URI, source=src)
     ast_cache = AstCache(dialect)
     # The server keeps the cache in step via did_open/did_change, so by the time
-    # completion runs the buffer has always been parsed at least once.
+    # a request runs the buffer has always been parsed at least once.
     ast_cache.refresh(URI, src)
 
     state = ProjectState(
@@ -74,10 +91,7 @@ def complete(
         undocumented=undocumented or [],
         dbt_root=DBT_ROOT,
     )
-
-    return serve_completions(
-        state=state, document=document, ast_cache=ast_cache, pos=pos
-    )
+    return state, document, ast_cache, pos
 
 
 def labels(items: list[types.CompletionItem] | None) -> list[str]:

@@ -12,6 +12,7 @@
 | Column completion | `textDocument/completion` | Suggests columns for an aliased model, source, CTE or `schema.table` (`alias.<column>`), with the column's data type shown as a detail. |
 | Undocumented tables | `textDocument/completion` | Warehouse tables the project has no YAML for still complete: inside `source('...')` (marked `not in sources.yml`), as `schema.table` after `from` / `join`, and their columns after an alias. Needs the `database` schema source. |
 | Go to definition | `textDocument/definition` | Jumps from `ref('model')` to that model's `.sql` file. |
+| Hover | `textDocument/hover` | Over `ref('model')` or `source('src', 'table')`: the model's file or the source's relation, and its columns with types. Over `alias.column`: the column's type and the relation it belongs to. |
 | Config enrichment | on `initialize` | Reads documented columns from the hand-written `schema.yml` files. |
 | Catalog enrichment | on `initialize` | Reads model and source column info from `target/catalog.json` when available. |
 | Database enrichment | in the background after `initialize` | Reads column names and data types for models and sources directly from the connected warehouse. |
