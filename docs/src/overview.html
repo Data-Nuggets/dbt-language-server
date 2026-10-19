@@ -4,7 +4,7 @@
       <p class="lede">A language server that gives dbt SQL files completion for models, sources, CTEs and typed columns. These pages explain how to use it, how the code works and what works on which platform.<span data-internal> The Findings and Tasks tabs cover what is still broken and what to do next.</span></p>
       <div class="chips">
         <span class="chip"><b>Release</b> 0.4.1</span>
-        <span class="chip" data-internal><b>Reviewed at</b> 0.3.8; updated for 0.4.1</span>
+        <span class="chip" data-internal><b>Reviewed at</b> 0.3.8; updated 19 October 2026</span>
         <span class="chip"><b>Source</b> about 3,900 lines, 17 modules</span>
         <span class="chip"><b>Tests</b> 335 pass, plus 17 against real containers</span>
         <span class="chip"><b>Live backends</b> 9</span>
@@ -75,5 +75,5 @@
           </tbody>
         </table>
       </div>
-      <p class="note">This describes main after 0.4.1. "Works" means the reader ran against a real instance in a test: DuckDB in the default run, the other four in the container tests. The cloud platforms have not been run against a real account in any test. Two fixes found by the container tests are not released yet: the Spark extra, and SQL Server types with their precision.<span data-internal> Which cloud platforms you verified by hand over the summer is not recorded anywhere in the repo, so I could not include it.</span></p>
+      <p class="note">This describes main after 0.4.1. "Works" means the reader ran against a real instance in a test: DuckDB in the default run, the other four in the container tests, which CI runs on every push. The cloud platforms have not been run against a real account in any test. Not released yet: two fixes found by the container tests (the Spark extra, and SQL Server types with their precision) and <code>--profiles-dir</code> / <code>DBT_PROFILES_DIR</code> support.<span data-internal> Which cloud platforms you verified by hand over the summer is not recorded anywhere in the repo, so I could not include it.</span></p>
     </section>
