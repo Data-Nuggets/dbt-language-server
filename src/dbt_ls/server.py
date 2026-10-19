@@ -880,6 +880,7 @@ def serve_hover(
 ) -> types.Hover | None:
     """What the ref, source or `alias.column` under the cursor points at."""
     line = document.lines[pos.line] if pos.line < len(document.lines) else ""
+    where = f"{pos.line}:{pos.character}"
 
     def answer(markdown: str, start: int, end: int) -> types.Hover:
         return types.Hover(
@@ -896,7 +897,14 @@ def serve_hover(
         wanted = found.group("model").casefold()
         model = next((m for m in state.models if m.name.casefold() == wanted), None)
         if model is None:
+            log.info("HOVER @ %s: ref %r matches no model", where, found["model"])
             return None
+        log.info(
+            "HOVER @ %s: ref %r → model, %d columns",
+            where,
+            model.name,
+            len(model.columns),
+        )
         return answer(
             hover_text.relation_hover(model, dbt_root=state.dbt_root),
             *found.span("model"),
@@ -916,8 +924,17 @@ def serve_hover(
         undocumented = relation is None
         if undocumented:
             relation = next(filter(named, state.undocumented), None)
+        call = f"{found['source']}.{found['table']}"
         if relation is None:
+            log.info("HOVER @ %s: source %r matches no table", where, call)
             return None
+        log.info(
+            "HOVER @ %s: source %r → %s, %d columns",
+            where,
+            call,
+            "undocumented warehouse table" if undocumented else "source",
+            len(relation.columns),
+        )
         return answer(
             hover_text.relation_hover(
                 relation, dbt_root=state.dbt_root, undocumented=undocumented
@@ -927,12 +944,16 @@ def serve_hover(
         )
 
     if m := dotted_at(line, pos.character):
+        alias = m.group("alias")
         parsed = ast_cache.get(document.uri)
         if parsed is None:
+            log.debug("HOVER @ %s: no usable AST for %s", where, document.uri)
             return None
         alias_pos = types.Position(line=pos.line, character=m.start("alias"))
-        declaration = declaration_at(document, parsed, m.group("alias"), alias_pos)
+        declaration = declaration_at(document, parsed, alias, alias_pos)
         if declaration is None:
+            # Also every `schema.table`, so not worth more than debug.
+            log.debug("HOVER @ %s: %r is not an alias in scope", where, alias)
             return None
         ctes = resolve_ctes(
             parsed.ctes, state.models, [*state.sources, *state.undocumented]
@@ -941,8 +962,24 @@ def serve_hover(
             declaration, ctes, state.models, state.sources, state.undocumented
         )
         if relation is None:
+            log.info(
+                "HOVER @ %s: alias %r → %s %r, which is not known",
+                where,
+                alias,
+                declaration.ref_type,
+                declaration.ref,
+            )
             return None
         undocumented = any(relation is s for s in state.undocumented)
+        log.info(
+            "HOVER @ %s: %s.%s → %s %r, %d columns",
+            where,
+            alias,
+            m.group("column"),
+            declaration.ref_type,
+            relation.name,
+            len(relation.columns),
+        )
         if pos.character <= m.end("alias"):
             return answer(
                 hover_text.relation_hover(
@@ -958,6 +995,7 @@ def serve_hover(
             m.start("column"),
             m.end("column"),
         )
+    log.debug("HOVER @ %s: nothing to show on %r", where, line.strip())
     return None
 
 
