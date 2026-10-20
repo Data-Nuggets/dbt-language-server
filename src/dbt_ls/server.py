@@ -530,11 +530,14 @@ def watched_files(ls: DbtLanguageServer, params: types.DidChangeWatchedFilesPara
         change.type != types.FileChangeType.Changed and _is_refable(path)
         for change, path in zip(params.changes, paths)
     )
+    seeds_changed = any(path and path.endswith(".csv") for path in paths)
     ls.yaml_changed |= yaml_changed
-    if ls.state is None or not (yaml_changed or refable):
+    if ls.state is None or not (yaml_changed or refable or seeds_changed):
         return
     if yaml_changed:
         reload_sources(ls.state, ls.settings.schema_sources)
+    if seeds_changed:
+        ls.state.refresh_seeds()
     ls.state.ref_names = discover_ref_names(ls.state.dbt_root)
     publish_all(ls)
 
@@ -560,9 +563,11 @@ def on_initialized(ls: DbtLanguageServer, params: types.InitializedParams):
                             types.FileSystemWatcher(glob_pattern="**/*.yml"),
                             # Only coming and going: an edit renames nothing.
                             types.FileSystemWatcher(
-                                glob_pattern="**/*.{sql,py,csv}",
+                                glob_pattern="**/*.{sql,py}",
                                 kind=types.WatchKind.Create | types.WatchKind.Delete,
                             ),
+                            # Seeds, edits included: the header is the columns.
+                            types.FileSystemWatcher(glob_pattern="**/*.csv"),
                         ]
                     ),
                 )
@@ -655,7 +660,8 @@ def columns_from_sql(ls: DbtLanguageServer, uri: str) -> bool:
     model = next((m for m in state.models if str(m.path) == path), None)
     parsed = ls.ast_cache.get(uri)
     document = ls.workspace.get_text_document(uri)
-    if model is None or parsed is None:
+    # A seed's columns come from its header, read by the file watcher.
+    if model is None or parsed is None or model.model_type == "seed":
         return False
     if parsed.source != neutralise_jinja(document.source):
         # Only a repaired or older parse: not what the file says.
@@ -750,7 +756,11 @@ def _relation_item(
 
 def _ref_item(m: Model, replace: types.Range) -> types.CompletionItem:
     return _relation_item(
-        m.name, f"{{{{ ref('{m.name}') }}}}", MODEL, replace, filter_text=m.name
+        m.name,
+        f"{{{{ ref('{m.name}') }}}}",
+        m.model_type or MODEL,
+        replace,
+        filter_text=m.name,
     )
 
 

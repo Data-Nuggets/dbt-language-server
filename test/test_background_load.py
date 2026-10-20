@@ -99,6 +99,7 @@ def test_names_and_documented_columns_do_not_wait_for_the_warehouse(
         assert {m.name for m in early.models} == {
             "my_first_dbt_model",
             "my_second_dbt_model",
+            "card_rarities",
         }
         assert any(m.columns for m in early.models)
         assert types_of(early) == {None}

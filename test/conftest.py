@@ -20,6 +20,7 @@ class FakeProject:
     """`ProjectState.__post_init__` only asks the project for `model_paths`."""
 
     model_paths: tuple[str, ...] = ()
+    seed_paths: tuple[str, ...] = ()
 
 
 def split_cursor(text: str) -> tuple[str, types.Position]:

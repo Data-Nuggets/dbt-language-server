@@ -1,0 +1,7 @@
+version: 2
+
+seeds:
+  - name: card_rarities
+    description: "Rarity levels, loaded into their own schema."
+    config:
+      schema: lookups

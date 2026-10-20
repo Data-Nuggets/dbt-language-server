@@ -258,7 +258,8 @@ class TestCheckCommand:
         row = next(
             line.split() for line in out.splitlines() if line.startswith("database")
         )
-        assert row[1:3] == ["2", "2"] and row[-1] == "ok"
+        # Two models and the seed.
+        assert row[1:3] == ["3", "3"] and row[-1] == "ok"
 
     def test_problems_give_exit_status_1(self, project, capsys):
         assert check.main([str(project)]) == 1
