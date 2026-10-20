@@ -9,6 +9,7 @@ from dbt_ls.column import Column
 from dbt_ls.model import (
     Model,
     SourcedList,
+    WarehouseTable,
     discover_models,
     enrich_models_from_catalog,
     enrich_models_from_config,
@@ -42,9 +43,9 @@ class ProjectState:
     profile_target: ProfileTarget | None
     models: list[Model] = field(default_factory=list)
     sources: list[SourceTable] = field(default_factory=list)
-    # Warehouse tables the project does not mention, as sources named after
-    # their schema. Filled by the warehouse read only.
-    undocumented: list[SourceTable] = field(default_factory=list)
+    # Warehouse tables the project does not mention. Filled by the warehouse
+    # read only.
+    undocumented: list[WarehouseTable] = field(default_factory=list)
     dbt_root: str = "."
     report: LoadReport = field(default_factory=LoadReport)
 
@@ -53,6 +54,15 @@ class ProjectState:
             self.models = discover_models(self.dbt_root, self.project.model_paths)
         if not self.sources:
             self.sources = discover_sources(self.dbt_root)
+
+    @property
+    def tables(self) -> list[SourceTable | WarehouseTable]:
+        """Every table `source()` or `from` can name, declared sources first.
+
+        The order is the precedence: a lookup that takes the first match gets
+        what the project declares before what only the warehouse has.
+        """
+        return [*self.sources, *self.undocumented]
 
     def refresh_from_catalog(self):
         # Self-guarded so callers can treat every refresh_* method as an

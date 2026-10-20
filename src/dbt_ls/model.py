@@ -175,6 +175,21 @@ class WarehouseTable(HasColumns):
     database: str | None = None
     columns: tuple[Column, ...] = ()
 
+    # Addressed like a SourceTable, so a table nobody declared completes and
+    # resolves wherever a declared one does.
+    @property
+    def source_name(self) -> str | None:
+        """What `source()` names it by until it is declared: its schema."""
+        return self.schema
+
+    @property
+    def relation_schema(self) -> str | None:
+        return self.schema
+
+    @property
+    def relation_name(self) -> str:
+        return self.name
+
 
 def _declared(value) -> str | None:
     """A literal from a YAML file, or None when it is jinja we cannot render."""
@@ -882,12 +897,12 @@ def find_source_table(
     database = _declared(source.database)
     candidates = [
         t
-        for t in by_name.get((source.identifier or source.name).casefold(), [])
+        for t in by_name.get(source.relation_name.casefold(), [])
         if not _differs(t.database, database)
     ]
     if source.schema is not None and _declared(source.schema) is None:
         return candidates[0] if len(candidates) == 1 else None
-    schema = source.schema or source.source_name
+    schema = source.relation_schema
     return next((t for t in candidates if _same(t.schema, schema)), None)
 
 
@@ -915,12 +930,11 @@ def undocumented_tables(
     sources: list[SourceTable],
     tables: list[WarehouseTable],
     profile_target: ProfileTarget,
-) -> list[SourceTable]:
+) -> list[WarehouseTable]:
     """Warehouse tables that are neither a model nor a documented source.
 
-    Shaped like sources, named after their schema, so that everything which
-    completes for a documented source also works for a table nobody has
-    written YAML for yet.
+    A table without a schema is left out: there is no name to give it in
+    `source()` or after `from`.
     """
     by_name = _tables_by_name(tables)
     database, schema = target_location(profile_target)
@@ -934,17 +948,7 @@ def undocumented_tables(
         for source in sources
         if (table := find_source_table(source, by_name)) is not None
     }
-    return [
-        SourceTable(
-            name=table.name,
-            source_name=table.schema,
-            database=table.database,
-            schema=table.schema,
-            columns=table.columns,
-        )
-        for table in tables
-        if id(table) not in claimed and table.schema
-    ]
+    return [t for t in tables if id(t) not in claimed and t.schema]
 
 
 def enrich_models_from_config(dbt_root: str) -> list[Model]:

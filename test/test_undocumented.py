@@ -4,15 +4,15 @@ import duckdb
 
 from test.conftest import complete, labels, model, source
 from dbt_ls.column import Column
+from dbt_ls.model import WarehouseTable
 from dbt_ls.server import Settings, _load_project, parse_schema_sources
 from dbt_ls.source import SourceTable
 
 
-def table(schema: str, name: str, *columns: str | tuple[str, str]) -> SourceTable:
+def table(schema: str, name: str, *columns: str | tuple[str, str]) -> WarehouseTable:
     """An undocumented warehouse table, the way the state holds it."""
-    return SourceTable(
+    return WarehouseTable(
         name=name,
-        source_name=schema,
         schema=schema,
         columns=tuple(Column(c) if isinstance(c, str) else Column(*c) for c in columns),
     )

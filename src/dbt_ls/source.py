@@ -19,6 +19,20 @@ class SourceTable(HasColumns):
     # The table's real name in the warehouse, when it differs from `name`.
     identifier: str | None = None
 
+    @property
+    def relation_schema(self) -> str:
+        """The schema dbt reads it from: the source's name unless YAML says."""
+        return self.schema or self.source_name
+
+    @property
+    def relation_name(self) -> str:
+        return self.identifier or self.name
+
+
+def declared(table) -> bool:
+    """A source from YAML, as opposed to a warehouse table nobody declared."""
+    return isinstance(table, SourceTable)
+
 
 def discover_sources(root: str) -> list:
     sources = []
