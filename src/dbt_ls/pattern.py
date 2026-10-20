@@ -31,12 +31,14 @@ def completion_context(line_prefix: str):
     if m := REF_RE.search(line_prefix):
         return ("ref", {})
     # Before the column pattern, which would read `raw.` as an alias.
+    # `start` is where the typed relation begins, so the completion can
+    # replace it with a ref() or source() call.
     if m := FROM_SCHEMA_RE.search(line_prefix):
-        return ("table", {"schema": m.group("schema")})
+        return ("table", {"schema": m.group("schema"), "start": m.start("schema")})
     if m := COLUMN_RE.search(line_prefix):
         return ("column", {"alias": m.group("alias")})
     if m := FROM_RE.search(line_prefix):
-        return ("cte", {})
+        return ("cte", {"start": m.start("name")})
     return None
 
 

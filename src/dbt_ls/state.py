@@ -11,6 +11,7 @@ from dbt_ls.model import (
     SourcedList,
     WarehouseTable,
     discover_models,
+    discover_ref_names,
     enrich_models_from_catalog,
     enrich_models_from_config,
     match_models,
@@ -21,12 +22,14 @@ from dbt_ls.model import (
 )
 from dbt_ls.profiles import ProfileTarget
 from dbt_ls.project import Project
+from dbt_ls.relations import names_every_column
 from dbt_ls.report import LoadReport
 from dbt_ls.resolve import compiled_relation_lookup, resolve_cte
 from dbt_ls.scope import dbt_dialect, dialect_for_profile_type, parse_ast, parse_ctes
 from dbt_ls.source import SourceTable, discover_sources, enrich_sources_from_catalog
 
 log = logging.getLogger("dbt_ls")
+
 
 
 @dataclass
@@ -46,6 +49,11 @@ class ProjectState:
     # Warehouse tables the project does not mention. Filled by the warehouse
     # read only.
     undocumented: list[WarehouseTable] = field(default_factory=list)
+    # Everything the last warehouse read returned, so sources can be matched
+    # again when their YAML changes without reading the warehouse again.
+    warehouse: list[WarehouseTable] = field(default_factory=list)
+    # Every name ref() can take, seeds, snapshots and packages included.
+    ref_names: set[str] = field(default_factory=set)
     dbt_root: str = "."
     report: LoadReport = field(default_factory=LoadReport)
 
@@ -54,6 +62,8 @@ class ProjectState:
             self.models = discover_models(self.dbt_root, self.project.model_paths)
         if not self.sources:
             self.sources = discover_sources(self.dbt_root)
+        if not self.ref_names:
+            self.ref_names = discover_ref_names(self.dbt_root)
 
     @property
     def tables(self) -> list[SourceTable | WarehouseTable]:
@@ -64,10 +74,14 @@ class ProjectState:
         """
         return [*self.sources, *self.undocumented]
 
+    @property
+    def catalog_path(self) -> Path:
+        return Path(self.dbt_root) / "target" / "catalog.json"
+
     def refresh_from_catalog(self):
         # Self-guarded so callers can treat every refresh_* method as an
         # interchangeable unit of enrichment.
-        catalog_path = Path(self.dbt_root) / "target" / "catalog.json"
+        catalog_path = self.catalog_path
         if not catalog_path.is_file():
             log.info("No catalog.json at %s; skipping catalog enrichment", catalog_path)
             return
@@ -94,9 +108,15 @@ class ProjectState:
             self.reconciliate_models(located)
         if models := match_models(self.models, tables, self.profile_target):
             self.reconciliate_models(models)
-        self.sources = match_sources(self.sources, tables)
+        self.warehouse = tables
+        self.match_warehouse()
+
+    def match_warehouse(self):
+        """Sources against the last warehouse read; what no model or source
+        claims is undocumented."""
+        self.sources = match_sources(self.sources, self.warehouse)
         self.undocumented = undocumented_tables(
-            self.models, self.sources, tables, self.profile_target
+            self.models, self.sources, self.warehouse, self.profile_target
         )
 
     def refresh_from_run_results(self, result_path: str):
@@ -136,6 +156,8 @@ class ProjectState:
                 columns=tuple(
                     Column(name=c.name, data_type=c.data_type) for c in mr.columns
                 ),
+                # A `*` expanded from columns YAML listed may have missed some.
+                all_columns=names_every_column(ast),
             ):
                 models.append(result_model)
 

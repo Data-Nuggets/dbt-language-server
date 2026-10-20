@@ -3,7 +3,7 @@ import logging
 import os
 import re
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import wraps
 from pathlib import Path
 from typing import Callable, Iterator
@@ -124,6 +124,9 @@ class Model(HasColumns):
     alias: str | None = None
     schema: str | None = None
     database: str | None = None
+    # True when `columns` is every column, as the warehouse or the catalog
+    # lists them; YAML often documents only some.
+    all_columns: bool = field(default=False, compare=False)
 
     def __repr__(self) -> str:
         return f"Model: {self.name}, Path: {self.path}, Model type: {self.model_type}"
@@ -157,6 +160,7 @@ class Model(HasColumns):
         }
         if other.columns:
             updates["columns"] = other.columns
+            updates["all_columns"] = other.all_columns
         return replace(self, **updates) if updates else self
 
 
@@ -317,6 +321,50 @@ def discover_models(root: str, model_paths: list[str]) -> list[Model]:
     )
 
 
+SNAPSHOT_TAG = re.compile(r"\{%-?\s*snapshot\s+(\w+)")
+# Installed packages are where other projects' models live, so unlike
+# IGNORED_DIRS this walk goes into dbt_packages.
+_NOT_REFABLE_DIRS = IGNORED_DIRS - {"dbt_packages"}
+
+
+def discover_ref_names(root: str) -> set[str]:
+    """Every name `ref()` can take: models, seeds and snapshots, packages'
+    included. Wider than the models dbt-ls describes, so that a ref to a seed
+    is not mistaken for a ref to nothing."""
+    names = set()
+    for directory, dirs, files in os.walk(root):
+        dirs[:] = [
+            d for d in dirs if d not in _NOT_REFABLE_DIRS and not d.startswith(".")
+        ]
+        for file in files:
+            stem, suffix = os.path.splitext(file)
+            if suffix in (".sql", ".py", ".csv"):
+                names.add(stem)
+            if suffix not in (".sql", ".yml"):
+                continue
+            text = Path(directory, file).read_text(errors="replace")
+            if "snapshot" not in text:
+                continue
+            # A snapshot is named by its tag, not its file, or since dbt 1.9
+            # declared in YAML with no SQL file at all.
+            if suffix == ".sql":
+                names.update(SNAPSHOT_TAG.findall(text))
+            else:
+                names.update(_yaml_snapshots(text))
+    return names
+
+
+def _yaml_snapshots(text: str) -> list[str]:
+    try:
+        doc = load_yaml(text)
+    except yaml.YAMLError:
+        return []
+    if not isinstance(doc, dict):
+        return []
+    entries = doc.get("snapshots") or []
+    return [s["name"] for s in entries if isinstance(s, dict) and "name" in s]
+
+
 def enrich_models_from_catalog(models: list[Model], catalog_path: Path) -> list[Model]:
     path = Path(catalog_path)
     if not path.is_file():
@@ -339,7 +387,10 @@ def enrich_models_from_catalog(models: list[Model], catalog_path: Path) -> list[
     return SourcedList(
         [
             Model(
-                name=m.name, path=m.path, columns=columns_by_name.get(m.name, m.columns)
+                name=m.name,
+                path=m.path,
+                columns=columns_by_name.get(m.name, m.columns),
+                all_columns=m.name in columns_by_name or m.all_columns,
             )
             for m in models
         ],
@@ -880,7 +931,7 @@ def match_models(
     for model in models:
         table = find_model_table(model, by_name, database, schema)
         if table is not None and table.columns:
-            matched.append(replace(model, columns=table.columns))
+            matched.append(replace(model, columns=table.columns, all_columns=True))
     return SourcedList(matched, source="enrich_models_from_database")
 
 
@@ -920,7 +971,7 @@ def match_sources(
     for source in sources:
         table = find_source_table(source, by_name)
         if table is not None and table.columns:
-            source = replace(source, columns=table.columns)
+            source = replace(source, columns=table.columns, all_columns=True)
         result.append(source)
     return result
 
