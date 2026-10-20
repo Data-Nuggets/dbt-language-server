@@ -19,19 +19,19 @@
         <table>
           <thead><tr><th>Module</th><th>Lines</th><th>What it owns</th></tr></thead>
           <tbody>
-            <tr><td><code>server.py</code></td><td>826</td><td>LSP handlers, project loading in two stages and its error handling, <code>serve_completions</code>, <code>columns_for</code>, the two commands.</td></tr>
-            <tr><td><code>model.py</code></td><td>996</td><td>The <code>Model</code> type, model discovery, the YAML and catalog readers, all nine warehouse readers with their registry, and the matching of warehouse tables to models and sources.</td></tr>
+            <tr><td><code>server.py</code></td><td>954</td><td>LSP handlers, project loading in two stages and its error handling, <code>serve_completions</code>, <code>serve_hover</code>, <code>relation_for</code>, the two commands.</td></tr>
+            <tr><td><code>model.py</code></td><td>1000</td><td>The <code>Model</code> and <code>WarehouseTable</code> types, model discovery, the YAML and catalog readers, all nine warehouse readers with their registry, and the matching of warehouse tables to models and sources.</td></tr>
             <tr><td><code>scope.py</code></td><td>614</td><td>The jinja-tolerant sqlglot dialect, the mid-edit repairs, the per-file AST cache, and turning a query into CTEs, tables and select lists.</td></tr>
             <tr><td><code>profiles.py</code></td><td>333</td><td>Finding and reading <code>profiles.yml</code>, one dataclass per adapter, helpful errors for missing or misspelled keys.</td></tr>
-            <tr><td><code>state.py</code></td><td>209</td><td><code>ProjectState</code>: the models, sources and undocumented tables shared by all handlers, the refresh methods, the merge rule, and the <code>run_results.json</code> reader.</td></tr>
+            <tr><td><code>state.py</code></td><td>219</td><td><code>ProjectState</code>: the models, sources and undocumented tables shared by all handlers, <code>tables</code> (sources, then undocumented tables), the refresh methods, the merge rule, and the <code>run_results.json</code> reader.</td></tr>
             <tr><td><code>alias.py</code></td><td>181</td><td>Regex search for alias declarations, and choosing the declaration that is in scope at the cursor.</td></tr>
-            <tr><td><code>resolve.py</code></td><td>146</td><td>Giving CTE columns their data types by following them to the model or source they come from, and expanding <code>*</code>.</td></tr>
-            <tr><td><code>source.py</code></td><td>80</td><td>The <code>SourceTable</code> type, source discovery from YAML, source columns from the catalog.</td></tr>
-            <tr><td><code>pattern.py</code></td><td>50</td><td>The regexes that decide what the cursor is completing, from the text left of it on the current line.</td></tr>
-            <tr><td><code>cli.py</code></td><td>72</td><td>Argument parsing, stdio or TCP transport, and handing <code>dbt-ls check</code> to <code>check.py</code>.</td></tr>
-            <tr><td><code>check.py</code></td><td>156</td><td>The <code>dbt-ls check</code> command: loads a project outside an editor and prints or returns as JSON what each schema source gave.</td></tr>
-            <tr><td><code>report.py</code></td><td>51</td><td><code>LoadReport</code>: what happened during a load, per schema source, with outcome, timing and counts.</td></tr>
-            <tr><td><code>seed.py</code></td><td>77</td><td>Unfinished and untracked. Nothing imports it.</td></tr>
+            <tr><td><code>resolve.py</code></td><td>141</td><td>Giving CTE columns their data types by following them to the model or source they come from, and expanding <code>*</code>.</td></tr>
+            <tr><td><code>hover.py</code></td><td>113</td><td>The text of a hover: a SQL signature, where the relation lives, and its columns lined up with their types.</td></tr>
+            <tr><td><code>source.py</code></td><td>94</td><td>The <code>SourceTable</code> type and <code>declared()</code>, source discovery from YAML, source columns from the catalog.</td></tr>
+            <tr><td><code>pattern.py</code></td><td>77</td><td>The regexes that decide what the cursor is completing, and which <code>ref</code>, <code>source</code> or <code>alias.column</code> it is on for hover and go to definition.</td></tr>
+            <tr><td><code>cli.py</code></td><td>80</td><td>Argument parsing, stdio or TCP transport, and handing <code>dbt-ls check</code> to <code>check.py</code>.</td></tr>
+            <tr><td><code>check.py</code></td><td>169</td><td>The <code>dbt-ls check</code> command: loads a project outside an editor and prints or returns as JSON what each schema source gave.</td></tr>
+            <tr><td><code>report.py</code></td><td>53</td><td><code>LoadReport</code>: what happened during a load, per schema source, with outcome, timing and counts.</td></tr>
             <tr><td><code>editors/vscode</code></td><td>231</td><td>The VS Code client: one server process per dbt project, command routing.</td></tr>
           </tbody>
         </table>
@@ -47,11 +47,12 @@
         <div style="--c: var(--heron-ochre-bright)"><b>3. Find aliases</b><span><code>parse_alias_list</code> runs three regexes over the live text: <code>ref</code>, <code>source</code>, and plain tables. Each keeps its qualifier: the source name, or the schema.</span></div>
         <div style="--c: var(--heron-rose-bright)"><b>4. Pick by scope</b><span><code>choose_alias</code> keeps the declaration inside the query block the cursor is in.</span></div>
         <div style="--c: var(--heron-olive-bright)"><b>5. Type the CTEs</b><span><code>resolve_ctes</code> copies data types from models and sources onto CTE columns.</span></div>
-        <div style="--c: var(--heron-orange-bright)"><b>6. Look up</b><span><code>columns_for</code> finds the relation among CTEs, models, sources and undocumented tables, using the qualifier to tell <code>raw.cards</code> from <code>crm.cards</code>.</span></div>
+        <div style="--c: var(--heron-orange-bright)"><b>6. Look up</b><span><code>relation_for</code> finds the relation among CTEs, models and <code>state.tables</code>, using the qualifier to tell <code>raw.cards</code> from <code>crm.cards</code>.</span></div>
       </div>
 
       <h3 class="sub">What wins when a name is known twice</h3>
       <p>What the project declares always wins. An undocumented warehouse table is used only when no CTE, model or documented source has the name. A bare <code>from orders o</code> uses one only if exactly one schema has a table called <code>orders</code>; with a schema in front there is no guessing.</p>
+      <p>The rule lives in one place: <code>state.tables</code> lists the documented sources before the undocumented tables, so any lookup that takes the first match gets the declared one. An undocumented table stays a <code>WarehouseTable</code>, and its type is what tells completion and hover to mark it <code>not in sources.yml</code>.</p>
 
       <h3 class="sub">Parsing dbt SQL without rendering jinja</h3>
       <p><code>dbt_dialect</code> in <code>scope.py</code> subclasses whichever sqlglot dialect the profile needs. A <code>{{ ref('x') }}</code> then parses as a table whose name is the jinja text, which <code>resolve.py</code> later matches with a regex.</p>
@@ -78,6 +79,17 @@
 
       <h3 class="sub">Coordinates</h3>
       <p>Three conventions meet here, which is easy to trip over. LSP positions are 0-based lines. <code>Alias</code> and <code>Position</code> use 1-based lines and 0-based columns. sqlglot gives character offsets, with an inclusive end. <code>serve_completions</code> converts at the boundary, and offsets are always resolved against the text that was parsed, not the live buffer.</p>
+    </section>
+
+    <section id="hover" data-toc="Hover">
+      <h2>Hover</h2>
+      <p>Hover reuses the lookups of completion and adds only the text. <code>serve_hover</code> in <code>server.py</code> finds what the cursor is on; <code>hover.py</code> turns it into Markdown and knows nothing about documents or positions.</p>
+      <div class="flow">
+        <div style="--c: var(--heron-orange-bright)"><b>1. What is under the cursor</b><span><code>ref_at</code>, <code>source_at</code> or <code>dotted_at</code> in <code>pattern.py</code> return the regex match, so the hover's range is exactly the name.</span></div>
+        <div style="--c: var(--heron-teal-bright)"><b>2. Find the relation</b><span>A <code>ref</code> by model name. A <code>source</code> as the first table in <code>state.tables</code> with that source and table name. An alias through <code>declaration_at</code> and <code>relation_for</code>, the same path as column completion.</span></div>
+        <div style="--c: var(--heron-ochre-bright)"><b>3. Write it out</b><span><code>relation_hover</code> or <code>column_hover</code>: a signature such as <code>(model) stg_cards</code>, a rule, where it lives, then the columns.</span></div>
+      </div>
+      <p>The columns are a SQL code block with the names padded so the types line up, not a Markdown table: Neovim draws a table as raw pipes unless a plugin renders it, while both editors colour a SQL block. At most 40 rows are shown, with the count underneath. Every hover that lands on a name is logged at INFO as <code>HOVER @ line:col</code>; misses on plain SQL only at DEBUG, because VS Code asks on every mouse rest.</p>
     </section>
 
     <section id="enrichment" data-toc="Column sources">
@@ -114,5 +126,5 @@ dbt-ls<span class="w"> </span>--schema-sources<span class="w"> </span>config,cat
       </div>
       <p style="margin-top:22px">Since 0.4.0 every reader returns a plain list of tables, each with its schema and, where known, its database. <code>match_models</code> and <code>match_sources</code> then decide which table belongs to which model or source, in one place for all nine platforms.</p>
       <p>Adding Snowflake, BigQuery or Fabric now means writing a function that lists tables; the matching comes for free.</p>
-      <p>Since 0.4.1 the tables that match nothing are not dropped. <code>undocumented_tables</code> turns them into source-like entries named after their schema, kept on <code>state.undocumented</code>. Readers still scan only the profile's own database, so sources in a second database, such as a Fabric lakehouse, are not found yet.</p>
+      <p>Since 0.4.1 the tables that match nothing are not dropped. <code>undocumented_tables</code> keeps them as the <code>WarehouseTable</code>s the reader returned, on <code>state.undocumented</code>. A <code>WarehouseTable</code> answers to the same <code>source_name</code> (its schema), <code>relation_schema</code> and <code>relation_name</code> as a <code>SourceTable</code>, so completion, hover and CTE typing treat both alike. Readers still scan only the profile's own database, so sources in a second database, such as a Fabric lakehouse, are not found yet.</p>
     </section>

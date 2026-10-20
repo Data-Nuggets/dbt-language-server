@@ -225,6 +225,9 @@ td:first-child { color: var(--heron-text-bright); font-weight: 600; white-space:
 .flow b { display: block; color: var(--heron-text-bright); font-size: 0.95rem; }
 .flow span { display: block; margin-top: 4px; font-size: 0.84rem; color: var(--heron-text-dim); }
 .flow code { font-size: 0.8em; }
+.flow + p { margin-top: 22px; }
+/* Three steps on a phone would leave the last one alone on its row. */
+@media (max-width: 560px) { .flow:has(> :nth-child(3):last-child) { grid-template-columns: 1fr; } }
 ul.tasks { list-style: none; padding: 0; margin: 18px 0 0; display: grid; gap: 10px; max-width: none; }
 ul.tasks li { display: grid; grid-template-columns: 54px minmax(0, 1fr); gap: 14px; padding: 14px 16px; border-radius: 14px; border: 1px solid var(--heron-border); background: color-mix(in srgb, var(--heron-bg-raised) 70%, transparent); margin: 0; }
 ul.tasks .id { font-weight: 800; color: var(--heron-orange-bright); font-size: 0.95rem; }
