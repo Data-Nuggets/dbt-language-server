@@ -6,14 +6,17 @@
 
 | Feature | LSP method / command | Description |
 | --- | --- | --- |
-| Model completion | `textDocument/completion` | Suggests dbt models inside `ref('...')` |
+| Model completion | `textDocument/completion` | Suggests dbt models and seeds inside `ref('...')` |
 | Source completion | `textDocument/completion` | Suggests sources inside `source('...')`, auto-inserting the `source_name`, `table` pair. In the second argument, suggests the tables of that source. |
-| CTE completion | `textDocument/completion` | Suggests the CTEs of the current file after `from` / `join`. |
-| Column completion | `textDocument/completion` | Suggests columns for an aliased model, source, CTE or `schema.table` (`alias.<column>`), with the column's data type shown as a detail. |
-| Undocumented tables | `textDocument/completion` | Warehouse tables the project has no YAML for still complete: inside `source('...')` (marked `not in sources.yml`), as `schema.table` after `from` / `join`, and their columns after an alias. Needs the `database` schema source. |
-| Go to definition | `textDocument/definition` | Jumps from `ref('model')` to that model's `.sql` file. |
+| Relation completion | `textDocument/completion` | After `from` / `join`: the CTEs of the current file, then models as `{{ ref('...') }}` and tables as `{{ source('...', '...') }}`, replacing what was typed. |
+| Column completion | `textDocument/completion` | Suggests columns for an aliased model, seed, source, CTE or `schema.table` (`alias.<column>`), with the column's data type shown as a detail. |
+| Undocumented tables | `textDocument/completion` | Warehouse tables the project has no YAML for still complete: inside `source('...')` and after `from` / `join` (marked `not in sources.yml`, inserted as a `source()` call), and their columns after an alias. Needs the `database` schema source. |
+| Go to definition | `textDocument/definition` | Jumps from `ref('model')` to that model's `.sql` file, or a seed's `.csv`. |
 | Hover | `textDocument/hover` | Over `ref('model')` or `source('src', 'table')`: the model's file or the source's relation, and its columns with types. Over `alias.column`: the column's type and the relation it belongs to. |
-| Config enrichment | on `initialize` | Reads documented columns from the hand-written `schema.yml` files. |
+| Diagnostics | `textDocument/publishDiagnostics` | Flags a `source()` no YAML declares, a `ref()` to no model, seed or snapshot, and columns the relations do not have. See [Diagnostics](#diagnostics). |
+| Seeds | `ref('...')`, hover, diagnostics | CSVs under `seed-paths` work like models. Their header gives the columns; the catalog or the warehouse gives the types. |
+| File watching | `workspace/didChangeWatchedFiles` | Reloads sources when a `.yml` changes, seeds when a `.csv` does, and model columns after `dbt run`. A saved model takes its columns from its own select when that names them all. |
+| Config enrichment | on `initialize` | Reads documented columns from the hand-written `schema.yml` files, and where models and seeds are built. |
 | Catalog enrichment | on `initialize` | Reads model and source column info from `target/catalog.json` when available. |
 | Database enrichment | in the background after `initialize` | Reads column names and data types for models and sources directly from the connected warehouse. |
 | Profile resolution | on `initialize` | Locates the dbt profile (`--profiles-dir`, `DBT_PROFILES_DIR`, the project root, `~/.dbt`) and resolves the active target |
@@ -147,15 +150,15 @@ documented before it completes:
 ~~~sql
 select o.                           -- columns of raw.orders, with types
 from {{ source('raw', 'orders') }} o   -- offered as "raw · not in sources.yml"
-join crm.                           -- the tables of schema crm
+join crm.                           -- the tables of crm, inserted as source() calls
 ~~~
 
 | You type | You get |
 | --- | --- | 
 | `source('` | Documented sources first, then every other warehouse table. Accepting one inserts the schema as the source name. |
 | `source('raw', '` | The tables of `raw`, including the ones `sources.yml` leaves out. |
-| `from ` / `join ` | The CTEs of the file, then `schema.table` for each undocumented table. |
-| `from raw.` | The tables of schema `raw`. |
+| `from ` / `join ` | The CTEs of the file, then models as `{{ ref() }}`, then sources and undocumented tables as `{{ source() }}`. |
+| `from raw.` | The tables of schema `raw`, replacing `raw.` with the `source()` call. A table in the schema of a declared source takes that source's name. |
 | `alias.` | Typed columns, for `from raw.orders o` as well as for a `source()` call. |
 
 What the project declares always wins: an undocumented table is used only when
@@ -163,11 +166,33 @@ no CTE, model or documented source has the name.
 
 > [!NOTE]
 > dbt itself rejects a `source()` call until the source is declared in YAML.
-> The completion gets you the names and columns; add the source before
-> `dbt run`. The plain `schema.table` form runs as it is.
+> The completion gets you the names and columns, and a diagnostic names the
+> `.yml` file to declare it in; dbt-ls never edits YAML for you. Completion
+> never inserts a hard-coded `schema.table`: such a name reads whatever
+> environment it says, not the one `dbt run` targets.
 
 Only the database named in the profile is read. Sources that live in another
 database are completed from YAML and the catalog only.
+
+## Diagnostics
+
+Published on open and on every change.
+
+| Check | Severity |
+| --- | --- |
+| `source('a', 'b')` that no YAML declares, when the warehouse has the table. The message names the `.yml` to add it to. | Warning |
+| `source('a', 'b')` that nothing knows. | Error |
+| `ref('x')` naming no model, seed or snapshot, packages included. Two-argument and versioned refs are not checked. | Error |
+| `alias.column` the relation does not have. | Warning |
+| A bare column no relation in the query has, or that two have. | Warning |
+| An alias nothing in scope declares. | Error |
+
+Column checks follow CTEs, subqueries and `*`, and only run when they can be
+sure: every relation involved must list all its columns. Columns from the
+warehouse, `target/catalog.json`, a seed's header, a dbt run, or a model's own
+select (taken when the model is saved) count. Columns from YAML alone do not,
+because YAML often documents only some. While a file does not parse, only the
+`ref` and `source` checks run.
 
 ## Startup
 
