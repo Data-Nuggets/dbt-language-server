@@ -20,8 +20,14 @@ from pygls.workspace import TextDocument
 from dbt_ls import __version__
 from dbt_ls import hover as hover_text
 from dbt_ls.alias import Alias, choose_alias, parse_alias_list
+from dbt_ls.diagnostics import diagnose
 from dbt_ls.exceptions import *
-from dbt_ls.model import _DATABASE_METHOD_REGISTRY, Model, WarehouseTable
+from dbt_ls.model import (
+    _DATABASE_METHOD_REGISTRY,
+    Model,
+    WarehouseTable,
+    discover_ref_names,
+)
 from dbt_ls.pattern import (
     completion_context,
     dotted_at,
@@ -33,14 +39,22 @@ from dbt_ls.profiles import Profiles, ProfileTarget
 from dbt_ls.project import Project
 from dbt_ls.report import LoadReport, SourceReport
 from dbt_ls.resolve import resolve_ctes
+from dbt_ls.relations import model_columns
 from dbt_ls.scope import (
     AstCache,
     CTERef,
     Position,
     dialect_for_profile_type,
+    neutralise_jinja,
     query_blocks,
 )
-from dbt_ls.source import IGNORED_DIRS, SourceTable, declared
+from dbt_ls.source import (
+    IGNORED_DIRS,
+    SourceTable,
+    declared,
+    discover_sources,
+    enrich_sources_from_catalog,
+)
 from dbt_ls.state import ProjectState
 
 logging.basicConfig(
@@ -105,6 +119,12 @@ class DbtLanguageServer(LanguageServer):
         # The last run_results.json seen, to re-apply after a warehouse read
         # that was still running when it arrived.
         self.run_results_path: str | None = None
+        # Set when a .yml file changes, so a warehouse read that was still
+        # running reads its sources again before it is adopted.
+        self.yaml_changed = False
+        # Models whose columns were taken from their saved SQL during this
+        # load, so a warehouse read still running cannot undo it.
+        self.sql_columns: dict[str, Model] = {}
 
 
 server = DbtLanguageServer()
@@ -369,6 +389,8 @@ def load_project(ls: DbtLanguageServer):
     ls.load_generation += 1
     generation = ls.load_generation
     ls.run_results_path = None
+    ls.yaml_changed = False
+    ls.sql_columns = {}
 
     # Progress report setup
     token = "reload-project" + str(uuid.uuid4())
@@ -412,6 +434,7 @@ def load_project(ls: DbtLanguageServer):
     ls.state = state
     # Parse in the adapter's own dialect now that it is known.
     ls.ast_cache.dialect = state.report.dialect
+    publish_all(ls)
 
     if not from_warehouse:
         finish_with(state)
@@ -426,6 +449,14 @@ def load_project(ls: DbtLanguageServer):
         # A dbt run that finished meanwhile was applied to the old state.
         if ls.run_results_path:
             late.refresh_from_run_results(ls.run_results_path)
+        # So was a .yml file saved meanwhile, and so were files added.
+        if ls.yaml_changed:
+            reload_sources(late, ls.settings.schema_sources)
+        late.ref_names = state.ref_names
+        # Newer than the warehouse's columns for the same models.
+        if ls.sql_columns:
+            late.reconciliate_models(list(ls.sql_columns.values()))
+        publish_all(ls)
         finish_with(late)
 
     try:
@@ -451,15 +482,61 @@ def load_project(ls: DbtLanguageServer):
     threading.Thread(target=read_warehouse, name="dbt-ls-warehouse", daemon=True).start()
 
 
+def _is_project_yaml(path: str | None) -> bool:
+    """A .yml file dbt reads, as opposed to one under target/ or a package."""
+    if not path or not path.endswith(".yml"):
+        return False
+    return not IGNORED_DIRS.intersection(Path(path).parts)
+
+
+def _is_refable(path: str | None) -> bool:
+    """A file whose name ref() can take, packages' included."""
+    if not path or not path.endswith((".sql", ".py", ".csv")):
+        return False
+    return not (IGNORED_DIRS - {"dbt_packages"}).intersection(Path(path).parts)
+
+
+def reload_sources(state: ProjectState, schema_sources: tuple[SchemaSource, ...]):
+    """Sources from YAML again, enriched from what was already read.
+
+    Neither the catalog nor the warehouse is new, so the warehouse is not
+    queried again: the tables of its last read are matched once more.
+    """
+    state.sources = discover_sources(state.dbt_root)
+    for source in schema_sources:
+        if source is SchemaSource.CATALOG and state.catalog_path.is_file():
+            state.sources = enrich_sources_from_catalog(
+                state.sources, state.catalog_path
+            )
+        elif source is SchemaSource.DATABASE and state.warehouse:
+            state.match_warehouse()
+    log.info("Sources reloaded: %d declared tables", len(state.sources))
+
+
 @server.feature(types.WORKSPACE_DID_CHANGE_WATCHED_FILES)
-def run_results(ls: DbtLanguageServer, params: types.DidChangeWatchedFilesParams):
-    for change in params.changes:
-        change_path = to_fs_path(change.uri)
-        if change_path and change_path.endswith("run_results.json"):
-            log.info(f"{change.type}: {to_fs_path(change.uri)}")
-            ls.run_results_path = change_path
+def watched_files(ls: DbtLanguageServer, params: types.DidChangeWatchedFilesParams):
+    paths = [to_fs_path(change.uri) for change in params.changes]
+    for path in paths:
+        if path and path.endswith("run_results.json"):
+            log.info("run results changed: %s", path)
+            ls.run_results_path = path
             if ls.state:
-                ls.state.refresh_from_run_results(change_path)
+                ls.state.refresh_from_run_results(path)
+                # Columns of the models just run changed under open files.
+                publish_all(ls)
+    yaml_changed = any(_is_project_yaml(path) for path in paths)
+    # A new or removed model, seed or snapshot changes what ref() can name.
+    refable = any(
+        change.type != types.FileChangeType.Changed and _is_refable(path)
+        for change, path in zip(params.changes, paths)
+    )
+    ls.yaml_changed |= yaml_changed
+    if ls.state is None or not (yaml_changed or refable):
+        return
+    if yaml_changed:
+        reload_sources(ls.state, ls.settings.schema_sources)
+    ls.state.ref_names = discover_ref_names(ls.state.dbt_root)
+    publish_all(ls)
 
 
 @server.feature(types.INITIALIZED)
@@ -478,7 +555,14 @@ def on_initialized(ls: DbtLanguageServer, params: types.InitializedParams):
                         watchers=[
                             types.FileSystemWatcher(
                                 glob_pattern="**/target/run_results.json",
-                            )
+                            ),
+                            # Sources are declared in any .yml file.
+                            types.FileSystemWatcher(glob_pattern="**/*.yml"),
+                            # Only coming and going: an edit renames nothing.
+                            types.FileSystemWatcher(
+                                glob_pattern="**/*.{sql,py,csv}",
+                                kind=types.WatchKind.Create | types.WatchKind.Delete,
+                            ),
                         ]
                     ),
                 )
@@ -520,29 +604,91 @@ def refresh_ast(ls: DbtLanguageServer, uri: str):
     ls.ast_cache.refresh(uri, document.source)
 
 
+def publish(ls: DbtLanguageServer, uri: str):
+    """What dbt would stop at in this document, replacing what was shown."""
+    if ls.state is None or not uri.endswith(".sql"):
+        return
+    text = ls.workspace.get_text_document(uri).source
+    diagnostics = diagnose(text, ls.ast_cache.get(uri), ls.state)
+    ls.text_document_publish_diagnostics(
+        types.PublishDiagnosticsParams(uri=uri, diagnostics=diagnostics)
+    )
+
+
+def publish_all(ls: DbtLanguageServer):
+    """Every open document again, after what the project declares changed."""
+    for uri in list(ls.workspace.text_documents):
+        publish(ls, uri)
+
+
 @server.feature(types.TEXT_DOCUMENT_DID_OPEN)
 def did_open(ls: DbtLanguageServer, params: types.DidOpenTextDocumentParams):
     refresh_ast(ls, params.text_document.uri)
+    publish(ls, params.text_document.uri)
 
 
 @server.feature(types.TEXT_DOCUMENT_DID_CHANGE)
 def did_change(ls: DbtLanguageServer, params: types.DidChangeTextDocumentParams):
     refresh_ast(ls, params.text_document.uri)
+    publish(ls, params.text_document.uri)
 
 
 @server.feature(types.TEXT_DOCUMENT_DID_SAVE)
 def did_save(ls: DbtLanguageServer, params: types.DidSaveTextDocumentParams):
     refresh_ast(ls, params.text_document.uri)
+    if columns_from_sql(ls, params.text_document.uri):
+        publish_all(ls)
+
+
+def columns_from_sql(ls: DbtLanguageServer, uri: str) -> bool:
+    """Take a saved model's columns from its SQL, when that names them all.
+
+    The warehouse knows a model as it was last built, so a column just added
+    upstream would be "not in" it downstream until the next `dbt run`. A
+    select that names every output says the same without the run. True when
+    the model's columns changed.
+    """
+    state = ls.state
+    path = to_fs_path(uri)
+    if state is None or path is None:
+        return False
+    model = next((m for m in state.models if str(m.path) == path), None)
+    parsed = ls.ast_cache.get(uri)
+    document = ls.workspace.get_text_document(uri)
+    if model is None or parsed is None:
+        return False
+    if parsed.source != neutralise_jinja(document.source):
+        # Only a repaired or older parse: not what the file says.
+        return False
+    columns = model_columns(parsed.ast, state.models, state.sources, state.undocumented)
+    if columns is None:
+        return False
+    # The warehouse's types are better than none for what still passes
+    # through unchanged.
+    columns = tuple(
+        c if c.data_type else model.column(c.name) or c for c in columns
+    )
+    if model.all_columns and columns == model.columns:
+        return False
+    log.info("Columns of %s from its SQL: %s", model.name, [c.name for c in columns])
+    updated = replace(model, columns=columns, all_columns=True)
+    ls.sql_columns[model.name] = updated
+    state.reconciliate_models([updated])
+    return True
 
 
 @server.feature(types.TEXT_DOCUMENT_DID_CLOSE)
 def did_close(ls: DbtLanguageServer, params: types.DidCloseTextDocumentParams):
     ls.ast_cache.discard(params.text_document.uri)
+    # A closed file is not checked, so nothing about it should linger.
+    ls.text_document_publish_diagnostics(
+        types.PublishDiagnosticsParams(uri=params.text_document.uri, diagnostics=[])
+    )
 
 
 # How a warehouse table without YAML is marked in the completion list.
 UNDOCUMENTED = "not in sources.yml"
-WAREHOUSE_TABLE = "warehouse table"
+MODEL = "model"
 # Sorts after every identifier, so what the project declares is offered first.
 SORT_LAST = "~"
 
@@ -559,6 +705,73 @@ def _table_item(table, description: str, **fields) -> types.CompletionItem:
         label_details=types.CompletionItemLabelDetails(description=description),
         sort_text=None if declared(table) else SORT_LAST + table.name,
         **fields,
+    )
+
+
+def source_name_for(
+    table: SourceTable | WarehouseTable, sources: list[SourceTable]
+) -> str:
+    """The name `source()` should call a table by.
+
+    A table nobody declared belongs with a declared source over the same
+    schema, if there is one; otherwise its schema names it.
+    """
+    if declared(table):
+        return table.source_name
+    owner = next((s for s in sources if _in_schema(s, table.schema)), None)
+    return owner.source_name if owner else table.schema
+
+
+def _typed(pos: types.Position, start: int) -> types.Range:
+    """From where the relation's name starts up to the cursor: what a ref() or
+    source() call replaces, so no hard-coded schema.table is left behind."""
+    return types.Range(start=types.Position(line=pos.line, character=start), end=pos)
+
+
+def _relation_item(
+    label: str,
+    call: str,
+    description: str,
+    replace: types.Range,
+    *,
+    filter_text: str,
+    last: bool = False,
+) -> types.CompletionItem:
+    """A relation after FROM/JOIN, written as dbt reads it."""
+    return types.CompletionItem(
+        label,
+        kind=types.CompletionItemKind(22),
+        label_details=types.CompletionItemLabelDetails(description=description),
+        filter_text=filter_text,
+        text_edit=types.TextEdit(range=replace, new_text=call),
+        sort_text=SORT_LAST + label if last else None,
+    )
+
+
+def _ref_item(m: Model, replace: types.Range) -> types.CompletionItem:
+    return _relation_item(
+        m.name, f"{{{{ ref('{m.name}') }}}}", MODEL, replace, filter_text=m.name
+    )
+
+
+def _source_item(
+    table: SourceTable | WarehouseTable,
+    sources: list[SourceTable],
+    replace: types.Range,
+    typed_schema: str | None = None,
+) -> types.CompletionItem:
+    """`erp.cards` after FROM; just `cards` once `raw.` is typed, which the
+    client still has to match as typed."""
+    source_name = source_name_for(table, sources)
+    call = f"{{{{ source('{source_name}', '{table.name}') }}}}"
+    if typed_schema is None:
+        label = filter_text = f"{source_name}.{table.name}"
+    else:
+        label, filter_text = table.name, f"{typed_schema}.{table.name}"
+    if declared(table):
+        return _relation_item(label, call, source_name, replace, filter_text=filter_text)
+    return _relation_item(
+        label, call, UNDOCUMENTED, replace, filter_text=filter_text, last=True
     )
 
 
@@ -742,52 +955,39 @@ def serve_completions(
             for c in columns
         ]
     elif kind == "cte":
+        replace = _typed(pos, info["start"])
         parsed = ast_cache.get(document.uri)
-        # Warehouse tables do not depend on this file having parsed.
+        # Models and tables do not depend on this file having parsed.
         ctes = parsed.ctes if parsed is not None else ()
         log.info(
-            "CTE path matched %r → serving %d ctes: %s and %d warehouse tables",
+            "FROM path matched %r → serving %d ctes, %d models and %d tables",
             current_line,
             len(ctes),
-            [c.name for c in ctes[:15]],
-            len(undocumented),
+            len(models),
+            len(state.tables),
         )
-        return [
-            types.CompletionItem(
-                c.name,
-                kind=types.CompletionItemKind(18),
-                label_details=types.CompletionItemLabelDetails(description="CTE"),
-            )
-            for c in ctes
-        ] + [
-            types.CompletionItem(
-                f"{s.schema}.{s.name}",
-                kind=types.CompletionItemKind(22),
-                label_details=types.CompletionItemLabelDetails(
-                    description=WAREHOUSE_TABLE
-                ),
-                sort_text=SORT_LAST + f"{s.schema}.{s.name}",
-            )
-            for s in undocumented
-        ]
+        return (
+            [
+                types.CompletionItem(
+                    c.name,
+                    kind=types.CompletionItemKind(18),
+                    label_details=types.CompletionItemLabelDetails(description="CTE"),
+                )
+                for c in ctes
+            ]
+            + [_ref_item(m, replace) for m in models]
+            + [_source_item(t, sources, replace) for t in state.tables]
+        )
     elif kind == "table":
-        tables = [s for s in undocumented if _in_schema(s, info["schema"])]
+        schema, replace = info["schema"], _typed(pos, info["start"])
+        tables = [t for t in state.tables if _in_schema(t, schema)]
         log.info(
             "TABLE path matched %r → serving %d tables of schema %r",
             current_line,
             len(tables),
-            info["schema"],
+            schema,
         )
-        return [
-            types.CompletionItem(
-                s.name,
-                kind=types.CompletionItemKind(22),
-                label_details=types.CompletionItemLabelDetails(
-                    description=WAREHOUSE_TABLE
-                ),
-            )
-            for s in tables
-        ]
+        return [_source_item(t, sources, replace, schema) for t in tables]
     else:
         log.debug("no pattern matched for %r", current_line)
         return []

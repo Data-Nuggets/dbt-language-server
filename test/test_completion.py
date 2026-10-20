@@ -72,15 +72,47 @@ artists AS (
 )
 SELECT * FROM |"""
 
-    def test_offers_ctes_declared_in_the_document(self):
+    def test_offers_ctes_declared_in_the_document_then_models(self):
         assert labels(complete(self.SQL, models=[CARDS, ARTISTS])) == [
             "cards",
             "artists",
+            "stg_cards",
+            "stg_artists",
         ]
 
     def test_after_join_too(self):
         sql = self.SQL.replace("SELECT * FROM |", "SELECT * FROM cards JOIN |")
-        assert labels(complete(sql, models=[CARDS])) == ["cards", "artists"]
+        assert labels(complete(sql, models=[CARDS])) == [
+            "cards",
+            "artists",
+            "stg_cards",
+        ]
+
+    def test_a_cte_is_inserted_as_its_name(self):
+        cte = complete(self.SQL)[0]
+
+        assert cte.text_edit is None
+
+    def test_a_model_is_inserted_as_a_ref(self):
+        items = complete("select * from stg_c|", models=[CARDS])
+
+        (item,) = items
+        assert item.label_details.description == "model"
+        assert item.text_edit.new_text == "{{ ref('stg_cards') }}"
+        # Replaces what was typed rather than adding to it.
+        start, end = item.text_edit.range.start, item.text_edit.range.end
+        assert (start.character, end.character) == (14, 19)
+
+    def test_a_declared_source_is_inserted_as_a_source_call(self):
+        items = complete("select * from |", sources=[ORACLE])
+
+        (item,) = items
+        assert (item.label, item.label_details.description) == (
+            "src.oracle_cards",
+            "src",
+        )
+        assert item.text_edit.new_text == "{{ source('src', 'oracle_cards') }}"
+        assert item.sort_text is None
 
 
 class TestColumn:

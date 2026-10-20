@@ -45,7 +45,7 @@ WITH cards AS (
     SELECT card_id FROM {{ ref("stg_cards") }}
 )
 SELECT * FROM |"""
-    assert labels(complete(sql, models=[CARDS])) == ["cards"]
+    assert labels(complete(sql, models=[CARDS])) == ["cards", "stg_cards"]
 
 
 def test_scope_positions_are_not_shifted_by_the_header():

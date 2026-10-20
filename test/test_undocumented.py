@@ -86,7 +86,7 @@ class TestSourceCall:
 
 
 class TestPlainTableName:
-    def test_from_offers_schema_qualified_names_after_the_ctes(self):
+    def test_from_offers_them_after_the_ctes_as_source_calls(self):
         items = complete(
             "with recent as (select 1 as id)\nselect * from |",
             undocumented=[RAW_ORDERS, CRM_ORDERS],
@@ -94,10 +94,12 @@ class TestPlainTableName:
 
         assert details(items) == [
             ("recent", "CTE"),
-            ("raw.orders", "warehouse table"),
-            ("crm.orders", "warehouse table"),
+            ("raw.orders", "not in sources.yml"),
+            ("crm.orders", "not in sources.yml"),
         ]
         assert [i.sort_text for i in items] == [None, "~raw.orders", "~crm.orders"]
+        # Never a hard-coded schema.table: the schema names the source.
+        assert items[1].text_edit.new_text == "{{ source('raw', 'orders') }}"
 
     def test_from_works_in_a_file_that_does_not_parse(self):
         items = complete("select ((( from |", undocumented=[RAW_ORDERS])
@@ -108,9 +110,38 @@ class TestPlainTableName:
         items = complete("select * from raw.|", undocumented=UNDOCUMENTED)
 
         assert details(items) == [
-            ("orders", "warehouse table"),
-            ("refunds", "warehouse table"),
+            ("orders", "not in sources.yml"),
+            ("refunds", "not in sources.yml"),
         ]
+
+    def test_the_typed_schema_is_replaced_too(self):
+        line = "select * from raw.ord"
+        (orders, _) = complete(line + "|", undocumented=UNDOCUMENTED)
+
+        assert orders.text_edit.new_text == "{{ source('raw', 'orders') }}"
+        assert orders.text_edit.range.start.character == line.index("raw")
+        # Clients match the filter text against everything being replaced.
+        assert orders.filter_text == "raw.orders"
+
+    def test_after_a_schema_declared_sources_in_it_come_first(self):
+        erp = SourceTable(name="orders", source_name="erp", schema="raw")
+
+        items = complete(
+            "select * from raw.|", sources=[erp], undocumented=[RAW_REFUNDS]
+        )
+
+        assert details(items) == [("orders", "erp"), ("refunds", "not in sources.yml")]
+        assert items[0].text_edit.new_text == "{{ source('erp', 'orders') }}"
+
+    def test_a_table_joins_the_declared_source_over_its_schema(self):
+        # `raw` is read through the `erp` source, so dbt knows the table as
+        # erp.refunds once it is added there.
+        erp = SourceTable(name="orders", source_name="erp", schema="raw")
+
+        items = complete("select * from |", sources=[erp], undocumented=[RAW_REFUNDS])
+
+        assert labels(items) == ["erp.orders", "erp.refunds"]
+        assert items[1].text_edit.new_text == "{{ source('erp', 'refunds') }}"
 
     def test_schema_dot_is_not_mistaken_for_an_alias_elsewhere(self):
         items = complete(

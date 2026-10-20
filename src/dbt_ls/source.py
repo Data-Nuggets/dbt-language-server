@@ -1,5 +1,5 @@
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import yaml
@@ -18,6 +18,11 @@ class SourceTable(HasColumns):
     columns: tuple[Column, ...] = ()
     # The table's real name in the warehouse, when it differs from `name`.
     identifier: str | None = None
+    # The .yml file that declares it, to say where a missing table goes.
+    path: str | None = field(default=None, compare=False)
+    # True when `columns` is every column, as the warehouse or the catalog
+    # lists them; YAML often documents only some.
+    all_columns: bool = field(default=False, compare=False)
 
     @property
     def relation_schema(self) -> str:
@@ -64,6 +69,7 @@ def discover_sources(root: str) -> list:
                             ]
                         ),
                         identifier=table.get("identifier"),
+                        path=str(p),
                     )
                 )
     return sources
@@ -90,5 +96,10 @@ def enrich_sources_from_catalog(
     # `replace`, not a new SourceTable: where the source lives must survive,
     # it is what the warehouse lookup goes by.
     return [
-        replace(s, columns=columns_by_name.get(s.name) or s.columns) for s in sources
+        (
+            replace(s, columns=columns_by_name[s.name], all_columns=True)
+            if columns_by_name.get(s.name)
+            else s
+        )
+        for s in sources
     ]
