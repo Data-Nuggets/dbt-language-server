@@ -74,6 +74,7 @@ jobs:
     if: github.event_name == 'push' && startsWith(github.event.ref, 'refs/tags/')
     needs:
       - test
+      - containers
     runs-on: ubuntu-latest
 
     steps:
