@@ -4,8 +4,9 @@ from lsprotocol import types
 
 from dbt_ls.column import Column
 from dbt_ls.hover import MAX_COLUMNS
+from dbt_ls.model import WarehouseTable
 from dbt_ls.source import SourceTable
-from test.conftest import DBT_ROOT, hover, model, source
+from test.conftest import DBT_ROOT, hover, model
 
 CARDS = model("stg_cards", ("card_id", "bigint"), ("price", "decimal(18,2)"), "name")
 ERP = SourceTable(
@@ -16,9 +17,8 @@ ERP = SourceTable(
     identifier="cards_v2",
     columns=(Column("id", "bigint"), Column("name", "varchar")),
 )
-CRM = SourceTable(
+CRM = WarehouseTable(
     name="cards",
-    source_name="crm",
     schema="crm",
     columns=(Column("crm_id", "bigint"), Column("owner")),
 )
@@ -33,15 +33,30 @@ def span(result: types.Hover) -> tuple[int, int]:
     return result.range.start.character, result.range.end.character
 
 
+def signature(shown: str) -> str:
+    """The first line inside the opening ```sql block."""
+    assert shown.startswith("```sql\n"), shown
+    return shown.split("\n")[1]
+
+
+def columns(shown: str) -> list[str]:
+    """The lines of the column block, the second ```sql block."""
+    return shown.split("```sql\n")[2].split("\n```")[0].split("\n")
+
+
 class TestRef:
     def test_shows_the_model_path_and_columns(self):
         shown = text(hover("select * from {{ ref('stg_c|ards') }}", models=[CARDS]))
 
-        assert "**stg_cards** · model" in shown
+        assert signature(shown) == "(model) stg_cards"
         assert "`models/stg_cards.sql`" in shown
-        assert "| `price` | decimal(18,2) |" in shown
-        # A column without a type still gets its row.
-        assert "| `name` |  |" in shown
+        # Names padded so the types line up; an untyped column keeps its line.
+        assert columns(shown) == [
+            "card_id  bigint",
+            "price    decimal(18,2)",
+            "name",
+        ]
+        assert shown.endswith("*3 columns*")
 
     def test_range_covers_the_model_name(self):
         line = "select * from {{ ref('stg_cards') }}"
@@ -58,7 +73,7 @@ class TestRef:
 
         shown = text(hover("{{ ref('|stg_cards') }}", models=[aliased]))
 
-        assert "Configured schema `staging`, alias `cards`" in shown
+        assert "configured with schema `staging` · alias `cards`" in shown
 
     def test_says_where_columns_would_come_from(self):
         shown = text(hover("{{ ref('|stg_cards') }}", models=[model("stg_cards")]))
@@ -73,9 +88,13 @@ class TestRef:
 
         shown = text(hover("{{ ref('wi|de') }}", models=[wide]))
 
-        assert f"`c{MAX_COLUMNS - 1}`" in shown
-        assert f"`c{MAX_COLUMNS}`" not in shown
-        assert "…and 5 more" in shown
+        assert len(columns(shown)) == MAX_COLUMNS
+        assert f"*first {MAX_COLUMNS} of {MAX_COLUMNS + 5} columns*" in shown
+
+    def test_one_column_is_singular(self):
+        shown = text(hover("{{ ref('on|e') }}", models=[model("one", "id")]))
+
+        assert shown.endswith("*1 column*")
 
 
 class TestSource:
@@ -84,37 +103,39 @@ class TestSource:
             hover("select * from {{ source('erp', 'ca|rds') }}", sources=[ERP, CRM])
         )
 
-        assert "**erp.cards** · source" in shown
-        assert "`lake.raw.cards_v2`" in shown
-        assert "| `id` | bigint |" in shown
+        assert signature(shown) == "(source) erp.cards"
+        assert "reads `lake.raw.cards_v2`" in shown
+        assert columns(shown) == ["id    bigint", "name  varchar"]
 
     def test_works_on_the_source_name_too(self):
         line = "{{ source('erp', 'cards') }}"
         result = hover(line.replace("erp", "e|rp"), sources=[ERP, CRM])
 
-        assert "**erp.cards**" in text(result)
+        assert signature(text(result)) == "(source) erp.cards"
         assert span(result) == (line.index("erp"), line.index("cards") + len("cards"))
 
     def test_an_undocumented_table_says_so(self):
         shown = text(hover("{{ source('crm', 'ca|rds') }}", undocumented=[CRM]))
 
-        assert "**crm.cards** · warehouse table, not in sources.yml" in shown
-        assert "| `owner` |  |" in shown
+        assert signature(shown) == "(warehouse table) crm.cards"
+        assert "Not in sources.yml" in shown
+        assert columns(shown) == ["crm_id  bigint", "owner"]
 
     def test_a_documented_source_wins_over_the_warehouse(self):
         shown = text(
             hover("{{ source('erp', 'ca|rds') }}", sources=[ERP], undocumented=[ERP])
         )
 
-        assert "· source" in shown
+        assert signature(shown) == "(source) erp.cards"
 
 
 class TestAliasColumn:
     def test_column_shows_its_type_and_owner(self):
         result = hover("select c.pri|ce from {{ ref('stg_cards') }} c", models=[CARDS])
 
-        assert (
-            text(result) == "**price** `decimal(18,2)`\n\nColumn of model `stg_cards`"
+        assert text(result) == (
+            "```sql\n(column) price decimal(18,2)\n```\n\n---\n\n"
+            "from model `stg_cards`"
         )
         assert span(result) == (9, 14)
 
@@ -123,22 +144,21 @@ class TestAliasColumn:
             hover("select |c.price from {{ ref('stg_cards') }} c", models=[CARDS])
         )
 
-        assert "**stg_cards** · model" in shown
+        assert signature(shown) == "(model) stg_cards"
 
     def test_column_of_a_source(self):
         shown = text(
             hover("select s.na|me from {{ source('erp', 'cards') }} s", sources=[ERP])
         )
 
-        assert "Column of source `erp.cards`" in shown
-        assert "`varchar`" in shown
+        assert signature(shown) == "(column) name varchar"
+        assert shown.endswith("from source `erp.cards`")
 
     def test_column_of_a_warehouse_table(self):
         shown = text(hover("select x.ow|ner from crm.cards x", undocumented=[CRM]))
 
-        assert (
-            shown == "**owner** (type unknown)\n\nColumn of warehouse table `crm.cards`"
-        )
+        assert signature(shown) == "(column) owner"
+        assert shown.endswith("from warehouse table `crm.cards`")
 
     def test_column_of_a_cte(self):
         sql = (
@@ -148,14 +168,23 @@ class TestAliasColumn:
 
         shown = text(hover(sql, models=[CARDS]))
 
-        assert shown == "**price** `decimal(18,2)`\n\nColumn of CTE `priced`"
+        assert signature(shown) == "(column) price decimal(18,2)"
+        assert shown.endswith("from cte `priced`")
 
     def test_column_the_relation_does_not_have(self):
         shown = text(
             hover("select c.co|lour from {{ ref('stg_cards') }} c", models=[CARDS])
         )
 
-        assert "Not among the 3 known columns of model `stg_cards`" in shown
+        assert signature(shown) == "(column) colour"
+        assert "**Not found** among the 3 known columns of model `stg_cards`" in shown
+
+    def test_column_of_a_relation_without_columns(self):
+        shown = text(
+            hover("select c.pri|ce from {{ ref('bare') }} c", models=[model("bare")])
+        )
+
+        assert "model `bare`, which has no known columns" in shown
 
     def test_alias_in_another_block_is_not_used(self):
         sql = (

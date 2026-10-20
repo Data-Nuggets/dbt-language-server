@@ -3,7 +3,7 @@ from copy import deepcopy
 from typing import Callable, Iterable, TypeVar
 
 from dbt_ls.column import Column, HasColumns
-from dbt_ls.model import Model
+from dbt_ls.model import Model, WarehouseTable
 from dbt_ls.pattern import REF_FULL_RE, SOURCE_FULL_RE
 from dbt_ls.scope import CTERef, ModelRef, QueryColumn, QueryRef
 from dbt_ls.source import SourceTable
@@ -11,15 +11,15 @@ from dbt_ls.source import SourceTable
 log = logging.getLogger("dbt_ls")
 
 RelationLookup = Callable[[str], HasColumns | None]
+# Declared sources and warehouse tables nobody declared, in that order.
+Tables = Iterable[SourceTable | WarehouseTable]
 
 # What resolve_cte can resolve: anything shaped like a query block, i.e.
 # carrying `tables` and `selects`.
 Resolvable = TypeVar("Resolvable", CTERef, ModelRef)
 
 
-def relation_lookup(
-    models: Iterable[Model], sources: Iterable[SourceTable]
-) -> RelationLookup:
+def relation_lookup(models: Iterable[Model], sources: Tables) -> RelationLookup:
     """Resolve the raw text of a FROM/JOIN to the relation it names.
     ref('albums') -> 'albums'
     """
@@ -49,7 +49,7 @@ class ColumnPool(HasColumns):
 
 def compiled_relation_lookup(
     models: Iterable[Model],
-    sources: Iterable[SourceTable],
+    sources: Tables,
     ctes: Iterable[CTERef] = (),
 ) -> RelationLookup:
     """Resolve a FROM/JOIN in *compiled* SQL, where jinja is already rendered:
@@ -60,13 +60,8 @@ def compiled_relation_lookup(
     by_schema_and_name: dict[tuple[str, str], HasColumns] = {}
     for s in sources:
         by_name.setdefault(s.name.casefold(), s)
-        by_schema_and_name.setdefault(
-            (
-                (s.schema or s.source_name).casefold(),
-                (s.identifier or s.name).casefold(),
-            ),
-            s,
-        )
+        key = (s.relation_schema.casefold(), s.relation_name.casefold())
+        by_schema_and_name.setdefault(key, s)
     cte_by_name = {c.name.casefold(): c for c in ctes}
 
     def lookup(table: str) -> HasColumns | None:
@@ -135,7 +130,7 @@ def resolve_cte(cte: Resolvable, lookup: RelationLookup) -> Resolvable:
 def resolve_ctes(
     ctes: Iterable[CTERef],
     models: Iterable[Model],
-    sources: Iterable[SourceTable],
+    sources: Tables,
 ) -> tuple[CTERef, ...]:
     # In declaration order, each one seeing those before it: a CTE can select
     # from an earlier CTE, and its `*` and column types come from there.

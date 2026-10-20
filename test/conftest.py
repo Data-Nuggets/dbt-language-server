@@ -4,7 +4,7 @@ from lsprotocol import types
 from pygls.workspace import TextDocument
 
 from dbt_ls.column import Column
-from dbt_ls.model import Model
+from dbt_ls.model import Model, WarehouseTable
 from dbt_ls.scope import AstCache
 from dbt_ls.server import serve_completions, serve_hover
 from dbt_ls.source import SourceTable
@@ -54,7 +54,7 @@ def complete(
     *,
     models: list[Model] | None = None,
     sources: list[SourceTable] | None = None,
-    undocumented: list[SourceTable] | None = None,
+    undocumented: list[WarehouseTable] | None = None,
     dialect: str = "duckdb",
 ) -> list[types.CompletionItem] | None:
     """Run completion on `text` at its `|` marker."""
@@ -66,7 +66,7 @@ def hover(
     *,
     models: list[Model] | None = None,
     sources: list[SourceTable] | None = None,
-    undocumented: list[SourceTable] | None = None,
+    undocumented: list[WarehouseTable] | None = None,
     dialect: str = "duckdb",
 ) -> types.Hover | None:
     """Run hover on `text` at its `|` marker."""

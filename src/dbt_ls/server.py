@@ -20,9 +20,8 @@ from pygls.workspace import TextDocument
 from dbt_ls import __version__
 from dbt_ls import hover as hover_text
 from dbt_ls.alias import Alias, choose_alias, parse_alias_list
-from dbt_ls.column import Column
 from dbt_ls.exceptions import *
-from dbt_ls.model import _DATABASE_METHOD_REGISTRY, Model
+from dbt_ls.model import _DATABASE_METHOD_REGISTRY, Model, WarehouseTable
 from dbt_ls.pattern import (
     completion_context,
     dotted_at,
@@ -41,7 +40,7 @@ from dbt_ls.scope import (
     dialect_for_profile_type,
     query_blocks,
 )
-from dbt_ls.source import IGNORED_DIRS, SourceTable
+from dbt_ls.source import IGNORED_DIRS, SourceTable, declared
 from dbt_ls.state import ProjectState
 
 logging.basicConfig(
@@ -548,29 +547,27 @@ WAREHOUSE_TABLE = "warehouse table"
 SORT_LAST = "~"
 
 
-def _in_schema(source: SourceTable, schema: str) -> bool:
-    return (source.schema or source.source_name).casefold() == schema.casefold()
+def _in_schema(table: SourceTable | WarehouseTable, schema: str) -> bool:
+    return table.relation_schema.casefold() == schema.casefold()
 
 
-def columns_for(
-    declaration: Alias,
-    ctes: tuple[CTERef, ...],
-    models: list[Model],
-    sources: list[SourceTable],
-    undocumented: list[SourceTable] = (),
-) -> tuple[Column, ...]:
-    """Columns of the relation an alias is bound to."""
-    found = relation_for(declaration, ctes, models, sources, undocumented)
-    return found.columns if found else ()
+def _table_item(table, description: str, **fields) -> types.CompletionItem:
+    """A table inside `source(...)`; one nobody declared sorts after the rest."""
+    return types.CompletionItem(
+        table.name,
+        kind=types.CompletionItemKind(10),
+        label_details=types.CompletionItemLabelDetails(description=description),
+        sort_text=None if declared(table) else SORT_LAST + table.name,
+        **fields,
+    )
 
 
 def relation_for(
     declaration: Alias,
     ctes: tuple[CTERef, ...],
     models: list[Model],
-    sources: list[SourceTable],
-    undocumented: list[SourceTable] = (),
-) -> CTERef | Model | SourceTable | None:
+    tables: list[SourceTable | WarehouseTable],
+) -> CTERef | Model | SourceTable | WarehouseTable | None:
     """The relation an alias is bound to.
 
     `ref_type` records which pattern produced the alias, so "model" and
@@ -579,38 +576,33 @@ def relation_for(
     source or a warehouse table referenced without ref()/source() — hence the
     extra pools it falls back to.
 
-    `undocumented` holds warehouse tables the project has no YAML for. They
-    come last everywhere: what the project declares wins.
+    `tables` is `ProjectState.tables`: declared sources before warehouse
+    tables nobody declared, so the first match is what the project declares.
     """
     # parse_alias_list lowercases the document, the pools keep the casing they
     # were discovered with, so the comparison has to be case-insensitive.
     wanted = declaration.ref.casefold()
-    qualifier = declaration.qualifier
+    qualifier = (declaration.qualifier or "").casefold()
 
     def named(pool):
         return [r for r in pool if r.name.casefold() == wanted]
 
+    every = named(tables)
     if declaration.ref_type == "model":
         found = named(models)
     elif declaration.ref_type == "source":
-        every = named(sources) + named(undocumented)
         # The source named in the call; any source with that table otherwise.
         found = [
-            s
-            for s in every
-            if qualifier and s.source_name.casefold() == qualifier.casefold()
+            t for t in every if qualifier and t.source_name.casefold() == qualifier
         ] or every
     elif qualifier:
         # `raw.cards`: the table in that schema, else whatever has the name.
-        every = named(sources) + named(undocumented)
-        found = (
-            [s for s in every if _in_schema(s, qualifier)] or named(models) or every
-        )
+        found = [t for t in every if _in_schema(t, qualifier)] or named(models) or every
     else:
-        found = named(ctes) or named(models) or named(sources)
-        # An undocumented table only when the name points at exactly one.
-        if not found and len(only := named(undocumented)) == 1:
-            found = only
+        found = named(ctes) or named(models) or [t for t in every if declared(t)]
+        # A table nobody declared only when the name points at exactly one.
+        if not found and len(every) == 1:
+            found = every
     return found[0] if found else None
 
 
@@ -684,36 +676,21 @@ def serve_completions(
             [s.name for s in sources[:15]],
         )
         return [
-            types.CompletionItem(
-                s.name,
-                kind=types.CompletionItemKind(10),
-                label_details=types.CompletionItemLabelDetails(
-                    description=s.source_name
-                ),
+            _table_item(
+                s,
+                s.source_name if declared(s) else f"{s.source_name} · {UNDOCUMENTED}",
                 insert_text=f"{s.source_name}{quote}, {quote}{s.name}",
                 insert_text_format=types.InsertTextFormat.PlainText,
             )
-            for s in sources
-        ] + [
-            types.CompletionItem(
-                s.name,
-                kind=types.CompletionItemKind(10),
-                label_details=types.CompletionItemLabelDetails(
-                    description=f"{s.source_name} · {UNDOCUMENTED}"
-                ),
-                insert_text=f"{s.source_name}{quote}, {quote}{s.name}",
-                insert_text_format=types.InsertTextFormat.PlainText,
-                sort_text=SORT_LAST + s.name,
-            )
-            for s in undocumented
+            for s in state.tables
         ]
     elif kind == "source_table":
         wanted = info["source"].casefold()
         tables = [s for s in sources if s.source_name.casefold() == wanted]
         # Tables in the same schema that sources.yml does not list yet. The
         # typed name is taken as a schema too, for a source with no YAML at all.
-        schemas = {(s.schema or s.source_name).casefold() for s in tables} | {wanted}
-        listed = {(s.identifier or s.name).casefold() for s in tables}
+        schemas = {s.relation_schema.casefold() for s in tables} | {wanted}
+        listed = {s.relation_name.casefold() for s in tables}
         extra = [
             s
             for s in undocumented
@@ -725,23 +702,8 @@ def serve_completions(
             len(tables),
             info["source"],
         )
-        return [
-            types.CompletionItem(
-                s.name,
-                kind=types.CompletionItemKind(10),
-                label_details=types.CompletionItemLabelDetails(
-                    description=s.source_name
-                ),
-            )
-            for s in tables
-        ] + [
-            types.CompletionItem(
-                s.name,
-                kind=types.CompletionItemKind(10),
-                label_details=types.CompletionItemLabelDetails(description=UNDOCUMENTED),
-                sort_text=SORT_LAST + s.name,
-            )
-            for s in extra
+        return [_table_item(s, s.source_name) for s in tables] + [
+            _table_item(s, UNDOCUMENTED) for s in extra
         ]
     elif kind == "column":
         alias = info["alias"]
@@ -758,8 +720,9 @@ def serve_completions(
 
         # Resolved per request rather than at parse time: the types come from
         # state, which keeps being enriched after a document is first parsed.
-        ctes = resolve_ctes(parsed.ctes, models, [*sources, *undocumented])
-        columns = columns_for(declaration, ctes, models, sources, undocumented)
+        ctes = resolve_ctes(parsed.ctes, models, state.tables)
+        relation = relation_for(declaration, ctes, models, state.tables)
+        columns = relation.columns if relation else ()
         log.info(
             "COLUMN path: alias=%r @ %s → %s %r, %d columns: %s",
             alias,
@@ -911,20 +874,15 @@ def serve_hover(
         )
 
     if found := source_at(line, pos.character):
-        source_name = found.group("source").casefold()
-        table = found.group("table").casefold()
-
-        def named(s: SourceTable) -> bool:
-            return (
-                s.source_name.casefold() == source_name
-                and s.name.casefold() == table
-            )
-
-        relation = next(filter(named, state.sources), None)
-        undocumented = relation is None
-        if undocumented:
-            relation = next(filter(named, state.undocumented), None)
-        call = f"{found['source']}.{found['table']}"
+        call = (found["source"].casefold(), found["table"].casefold())
+        relation = next(
+            (
+                t
+                for t in state.tables
+                if (t.source_name.casefold(), t.name.casefold()) == call
+            ),
+            None,
+        )
         if relation is None:
             log.info("HOVER @ %s: source %r matches no table", where, call)
             return None
@@ -932,13 +890,11 @@ def serve_hover(
             "HOVER @ %s: source %r → %s, %d columns",
             where,
             call,
-            "undocumented warehouse table" if undocumented else "source",
+            hover_text.kind_of(relation),
             len(relation.columns),
         )
         return answer(
-            hover_text.relation_hover(
-                relation, dbt_root=state.dbt_root, undocumented=undocumented
-            ),
+            hover_text.relation_hover(relation, dbt_root=state.dbt_root),
             found.start("source"),
             found.end("table"),
         )
@@ -955,12 +911,8 @@ def serve_hover(
             # Also every `schema.table`, so not worth more than debug.
             log.debug("HOVER @ %s: %r is not an alias in scope", where, alias)
             return None
-        ctes = resolve_ctes(
-            parsed.ctes, state.models, [*state.sources, *state.undocumented]
-        )
-        relation = relation_for(
-            declaration, ctes, state.models, state.sources, state.undocumented
-        )
+        ctes = resolve_ctes(parsed.ctes, state.models, state.tables)
+        relation = relation_for(declaration, ctes, state.models, state.tables)
         if relation is None:
             log.info(
                 "HOVER @ %s: alias %r → %s %r, which is not known",
@@ -970,7 +922,6 @@ def serve_hover(
                 declaration.ref,
             )
             return None
-        undocumented = any(relation is s for s in state.undocumented)
         log.info(
             "HOVER @ %s: %s.%s → %s %r, %d columns",
             where,
@@ -982,16 +933,12 @@ def serve_hover(
         )
         if pos.character <= m.end("alias"):
             return answer(
-                hover_text.relation_hover(
-                    relation, dbt_root=state.dbt_root, undocumented=undocumented
-                ),
+                hover_text.relation_hover(relation, dbt_root=state.dbt_root),
                 m.start("alias"),
                 m.end("alias"),
             )
         return answer(
-            hover_text.column_hover(
-                m.group("column"), relation, undocumented=undocumented
-            ),
+            hover_text.column_hover(m.group("column"), relation),
             m.start("column"),
             m.end("column"),
         )
