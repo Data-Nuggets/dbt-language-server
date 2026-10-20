@@ -15,7 +15,13 @@ def test_database_source_fills_columns_from_duckdb():
 
     assert state.profile_target.type == "duckdb"
     columns = {m.name: m.columns for m in state.models}
-    assert set(columns) == {"my_first_dbt_model", "my_second_dbt_model"}
-    for name, model_columns in columns.items():
-        assert [c.name for c in model_columns] == ["id"], name
-        assert model_columns[0].data_type, name
+    assert set(columns) == {"my_first_dbt_model", "my_second_dbt_model", "card_rarities"}
+    for name in ("my_first_dbt_model", "my_second_dbt_model"):
+        assert [c.name for c in columns[name]] == ["id"], name
+        assert columns[name][0].data_type, name
+    # The seed, found in its custom schema: `main` + `_lookups`.
+    assert [(c.name, c.data_type) for c in columns["card_rarities"]] == [
+        ("rarity_id", "BIGINT"),
+        ("rarity", "VARCHAR"),
+        ("sort_order", "BIGINT"),
+    ]

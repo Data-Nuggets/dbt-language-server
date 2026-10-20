@@ -33,6 +33,9 @@ KINDS = {
 
 
 def kind_of(relation) -> str:
+    # A seed is a Model whose file is a CSV.
+    if isinstance(relation, Model) and relation.model_type:
+        return relation.model_type
     return KINDS[type(relation)]
 
 

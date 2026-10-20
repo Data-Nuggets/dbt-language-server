@@ -1,6 +1,6 @@
 import json
 import logging
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 
 import sqlglot
@@ -25,6 +25,7 @@ from dbt_ls.project import Project
 from dbt_ls.relations import names_every_column
 from dbt_ls.report import LoadReport
 from dbt_ls.resolve import compiled_relation_lookup, resolve_cte
+from dbt_ls.seed import discover_seeds
 from dbt_ls.scope import dbt_dialect, dialect_for_profile_type, parse_ast, parse_ctes
 from dbt_ls.source import SourceTable, discover_sources, enrich_sources_from_catalog
 
@@ -59,7 +60,13 @@ class ProjectState:
 
     def __post_init__(self):
         if not self.models:
-            self.models = discover_models(self.dbt_root, self.project.model_paths)
+            self.models = SourcedList(
+                [
+                    *discover_models(self.dbt_root, self.project.model_paths),
+                    *discover_seeds(self.dbt_root, self.project.seed_paths),
+                ],
+                source="discover_models",
+            )
         if not self.sources:
             self.sources = discover_sources(self.dbt_root)
         if not self.ref_names:
@@ -165,6 +172,25 @@ class ProjectState:
 
         if models:
             self.reconciliate_models(models)
+
+    def refresh_seeds(self):
+        """Seeds read again after a CSV came, went or changed.
+
+        A seed already known keeps where it is loaded and the types found for
+        it; only the header is new.
+        """
+        known = {m.name: m for m in self.models if m.model_type == "seed"}
+        fresh = discover_seeds(self.dbt_root, self.project.seed_paths)
+        seeds = []
+        for seed in fresh:
+            if (old := known.get(seed.name)) is not None:
+                typed = tuple(old.column(c.name) or c for c in seed.columns)
+                seed = replace(
+                    old, path=seed.path, columns=typed, all_columns=bool(typed)
+                )
+            seeds.append(seed)
+        others = [m for m in self.models if m.model_type != "seed"]
+        self.models = SourcedList([*others, *seeds], source="refresh_seeds")
 
     def reconciliate_models(self, models: list[Model]):
         """

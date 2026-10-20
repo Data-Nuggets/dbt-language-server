@@ -13,13 +13,14 @@ class Project:
         with open(path) as f:
             return yaml.safe_load(f) or {}
 
+    # dbt's own defaults, for a dbt_project.yml that leaves them out.
     @property
     def model_paths(self) -> list[str]:
-        return self.config.get("model-paths", [])
+        return self.config.get("model-paths", ["models"])
 
     @property
     def seed_paths(self) -> list[str]:
-        return self.config.get("seed-paths", [])
+        return self.config.get("seed-paths", ["seeds"])
 
     @property
     def profile(self) -> str:

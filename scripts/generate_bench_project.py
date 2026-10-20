@@ -10,9 +10,12 @@ metadata. What is generated, with the default sizes:
   table in `main`, `main_intermediate` or `main_marts`
 - raw schemas, half of them documented as sources and half not
 - unrelated schemas the project never mentions
+- seeds: CSVs with a few rows, half loaded into `main`, half into the custom
+  schema `main_lookups` that `_seeds.yml` declares; every fifth mart joins one
 """
 
 import argparse
+import csv
 import random
 import shutil
 from pathlib import Path
@@ -66,6 +69,7 @@ def main() -> None:
     p.add_argument("--unrelated-schemas", type=int, default=20)
     p.add_argument("--tables-per-schema", type=int, default=100)
     p.add_argument("--columns", type=int, default=25, help="Average columns per table")
+    p.add_argument("--seeds", type=int, default=20)
     p.add_argument("--seed", type=int, default=1)
     args = p.parse_args()
 
@@ -84,6 +88,7 @@ def main() -> None:
     (root / "dbt_project.yml").write_text(
         "name: 'bench'\nversion: '1.0.0'\nprofile: 'bench'\n"
         'model-paths: ["models"]\n'
+        'seed-paths: ["seeds"]\n'
         "models:\n  bench:\n"
         "    intermediate:\n      +schema: intermediate\n"
         "    marts:\n      +schema: marts\n"
@@ -134,6 +139,40 @@ def main() -> None:
         sources += [f"      - name: {table}" for table in entries]
     (root / "models" / "sources.yml").write_text("\n".join(sources) + "\n")
 
+    # Seeds: small lookup tables. The header is what dbt-ls reads; the rows
+    # are only there to make them look like seeds.
+    con.execute('CREATE SCHEMA "main_lookups"')
+    seeds: list[tuple[str, list]] = []
+    seeds_yml = ["version: 2", "", "seeds:"]
+    for i in range(args.seeds):
+        in_lookups = i % 2 == 0
+        folder = "lookups" if in_lookups else "reference"
+        name = f"{WORDS[i % len(WORDS)]}_{'codes' if in_lookups else 'mapping'}_{i:02d}"
+        cols = [("id", "BIGINT"), ("code", "VARCHAR"), ("label", "VARCHAR")]
+        spare = [f for f in FIELDS if f not in ("code", "label")]
+        cols += [(f, "VARCHAR") for f in rng.sample(spare, k=rng.randint(0, 4))]
+        path = root / "seeds" / folder / f"{name}.csv"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([c for c, _ in cols])
+            for row in range(1, 6):
+                writer.writerow(
+                    [row, f"C{row:02d}", f"{WORDS[row]} {row}"]
+                    + [f"{c}_{row}" for c, _ in cols[3:]]
+                )
+        create_table(con, "main_lookups" if in_lookups else "main", name, cols)
+        tables += 1
+        total_columns += len(cols)
+        seeds.append((name, cols))
+        if in_lookups:
+            seeds_yml += [
+                f"  - name: {name}",
+                "    config:",
+                "      schema: lookups",
+            ]
+    (root / "seeds" / "_seeds.yml").write_text("\n".join(seeds_yml) + "\n")
+
     # Models: half staging, 30 % intermediate, 20 % marts.
     n_staging = args.models // 2
     n_intermediate = args.models * 3 // 10
@@ -175,29 +214,42 @@ def main() -> None:
         )
         write_model("staging", name, sql, cols)
 
-    def joined(layer: str, prefix: str, index: int, parents: list) -> None:
+    def joined(
+        layer: str, prefix: str, index: int, parents: list, lookup=None
+    ) -> None:
         (left, left_cols), (right, right_cols) = rng.sample(parents, k=2)
         keep_left = left_cols[: max(2, len(left_cols) // 2)]
         taken = {c for c, _ in keep_left}
         keep_right = [c for c in right_cols[1:] if c[0] not in taken][:8]
         name = f"{prefix}_{WORDS[index % len(WORDS)]}__{index:04d}"
+        # A seed to label the rows with, the way marts use lookup tables.
+        seed_cte = seed_select = seed_join = ""
+        extra = []
+        if lookup is not None:
+            seed_cte = f",\nl as (\n    select * from {{{{ ref('{lookup}') }}}}\n)"
+            seed_select = ",\n    l.label as lookup_label"
+            seed_join = "left join l on l.id = a.id\n"
+            extra = [("lookup_label", "VARCHAR")]
         sql = (
             "with a as (\n"
             f"    select * from {{{{ ref('{left}') }}}}\n"
             "),\n"
             "b as (\n"
             f"    select * from {{{{ ref('{right}') }}}}\n"
-            ")\n"
+            f"){seed_cte}\n"
             "select\n    " + select_list("a", keep_left, "    ")
             + ("".join(f",\n    b.{c}" for c, _ in keep_right))
+            + seed_select
             + "\nfrom a\nleft join b on b.id = a.id\n"
+            + seed_join
         )
-        write_model(layer, name, sql, keep_left + keep_right)
+        write_model(layer, name, sql, keep_left + keep_right + extra)
 
     for i in range(n_intermediate):
         joined("intermediate", "int", i, layers["staging"][1])
     for i in range(n_marts):
-        joined("marts", "fct" if i % 2 else "dim", i, layers["intermediate"][1])
+        lookup = seeds[i // 5 % len(seeds)][0] if seeds and i % 5 == 0 else None
+        joined("marts", "fct" if i % 2 else "dim", i, layers["intermediate"][1], lookup)
 
     for layer, lines in schema_yml.items():
         (root / "models" / layer / f"_{layer}.yml").write_text("\n".join(lines) + "\n")
@@ -212,9 +264,10 @@ def main() -> None:
     print(f"project   {root}")
     print(f"models    {args.models} ({n_staging} staging, {n_intermediate} intermediate, {n_marts} marts)")
     print(f"sources   {len(raw)} documented tables in {len(documented)} schemas")
+    print(f"seeds     {len(seeds)}, half of them in main_lookups")
     print(
         f"warehouse {tables} tables, {total_columns} columns, "
-        f"{args.source_schemas + args.unrelated_schemas + 3} schemas, no rows"
+        f"{args.source_schemas + args.unrelated_schemas + 4} schemas, no rows"
     )
 
 

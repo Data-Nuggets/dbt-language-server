@@ -1,20 +1,20 @@
     <header class="hero" id="top">
       <span class="eyebrow">dbt-ls · project map</span>
       <h1>What dbt-ls does, and where it stands</h1>
-      <p class="lede">A language server that gives dbt SQL files completion for models, sources, CTEs and typed columns. These pages explain how to use it, how the code works and what works on which platform.<span data-internal> The Findings and Tasks tabs cover what is still broken and what to do next.</span></p>
+      <p class="lede">A language server that gives dbt SQL files completion for models, seeds, sources, CTEs and typed columns, hover, and diagnostics for what dbt or the warehouse would reject. These pages explain how to use it, how the code works and what works on which platform.<span data-internal> The Findings and Tasks tabs cover what is still broken and what to do next.</span></p>
       <div class="chips">
-        <span class="chip"><b>Release</b> 0.4.1</span>
-        <span class="chip" data-internal><b>Reviewed at</b> 0.3.8; updated 19 October 2026</span>
-        <span class="chip"><b>Source</b> about 3,900 lines, 17 modules</span>
-        <span class="chip"><b>Tests</b> 335 pass, plus 17 against real containers</span>
+        <span class="chip"><b>Release</b> 0.4.2</span>
+        <span class="chip" data-internal><b>Reviewed at</b> 0.3.8; updated 20 October 2026</span>
+        <span class="chip"><b>Source</b> about 5,000 lines, 20 modules</span>
+        <span class="chip"><b>Tests</b> 435 pass, plus 17 against real containers</span>
         <span class="chip"><b>Live backends</b> 9</span>
-        <span class="chip"><b>Date</b> 11 October 2026</span>
+        <span class="chip"><b>Date</b> 20 October 2026</span>
       </div>
     </header>
 
     <section id="does" data-toc="What it does">
       <h2>What it does</h2>
-      <p>The server reads a dbt project from disk, optionally asks the warehouse what columns exist, and answers completion, hover and go-to-definition requests from the editor. It never runs dbt and never renders jinja.</p>
+      <p>The server reads a dbt project from disk, optionally asks the warehouse what columns exist, and answers completion, hover and go-to-definition requests from the editor. While you type it reports what would fail: a <code>ref</code> or <code>source</code> dbt cannot resolve, a column the relation does not have. It never runs dbt, never renders jinja and never writes your YAML.</p>
       <div class="window">
         <div class="window-bar"><span class="dots"><i></i><i></i><i></i></span><span>models/int_cards.sql</span><button type="button" data-copy>Copy</button></div>
         <pre class="hl"><code><span class="k">with</span><span class="w"> </span><span class="n">cards</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="p">(</span>
@@ -28,31 +28,34 @@
 <span class="k">select</span>
 <span class="w">    </span><span class="n">cards</span><span class="p">.</span><span class="n">cost</span><span class="p">,</span><span class="w">                            </span><span class="c1">-- alias. completes typed columns</span>
 <span class="w">    </span><span class="k">sets</span><span class="p">.</span><span class="n">released_at</span>
-<span class="k">from</span><span class="w"> </span><span class="n">cards</span><span class="w">                                 </span><span class="c1">-- from/join completes CTE names</span>
+<span class="k">from</span><span class="w"> </span><span class="n">cards</span><span class="w">                                 </span><span class="c1">-- from/join completes CTEs, ref() and source()</span>
 <span class="k">join</span><span class="w"> </span><span class="k">sets</span><span class="w"> </span><span class="k">on</span><span class="w"> </span><span class="k">sets</span><span class="p">.</span><span class="n">code</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cards</span><span class="p">.</span><span class="n">id</span></code></pre>
       </div>
       <div class="grid">
-        <div class="card ok"><span class="badge">Works</span><h3>Model names in <code>ref('</code></h3><p>Lists every <code>.sql</code> file under the project's model paths, with its path as detail.</p></div>
+        <div class="card ok"><span class="badge">Works</span><h3>Models and seeds in <code>ref('</code></h3><p>Lists every <code>.sql</code> file under the project's model paths and every <code>.csv</code> under its seed paths, with the path as detail.</p></div>
         <div class="card ok"><span class="badge">Works</span><h3>Sources in <code>source('</code></h3><p>Lists source tables from the YAML files and inserts both arguments. In the second argument, lists the tables of that source. Warehouse tables with no YAML follow, marked <code>not in sources.yml</code>.</p></div>
-        <div class="card ok"><span class="badge">Works</span><h3>CTE names after <code>from</code> / <code>join</code></h3><p>Offers the CTEs declared in the current file, then warehouse tables as <code>schema.table</code>. After <code>from schema.</code> it lists that schema only.</p></div>
-        <div class="card warn"><span class="badge">Partly</span><h3>Columns after <code>alias.</code></h3><p>Resolves the alias to a model, source, CTE or plain <code>schema.table</code> in the current query block and lists its columns with data types. Still fails in a few cases<span data-internal>, listed under Findings</span>.</p></div>
+        <div class="card ok"><span class="badge">New in 0.4.2</span><h3>dbt syntax after <code>from</code> / <code>join</code></h3><p>Offers the file's CTEs, then models as <code>{{ ref('…') }}</code> and tables as <code>{{ source('…', '…') }}</code>, replacing what was typed, <code>schema.</code> included. Never inserts a hard-coded <code>schema.table</code>.</p></div>
+        <div class="card warn"><span class="badge">Partly</span><h3>Columns after <code>alias.</code></h3><p>Resolves the alias to a model, seed, source, CTE or plain <code>schema.table</code> in the current query block and lists its columns with data types. Still fails in a few cases<span data-internal>, listed under Findings</span>.</p></div>
         <div class="card ok"><span class="badge">New in 0.4.1</span><h3>Tables nobody documented</h3><p>Every warehouse table that matches no model and no documented source is kept and offered in completion, with its columns. Nothing has to be written in YAML first.</p></div>
         <div class="card ok"><span class="badge">New in 0.4.1</span><h3>Loads in the background</h3><p>Names complete as soon as the files are read. The warehouse is read in one statement per database on a separate thread, and live columns follow.</p></div>
-        <div class="card ok"><span class="badge">On main</span><h3>Hover</h3><p>Over <code>ref('…')</code> or <code>source(…)</code>: the model's file or the relation it reads, then its columns with types. Over <code>alias.column</code>: the column's type and where it comes from, or that the relation has no such column.</p></div>
-        <div class="card ok"><span class="badge">Works</span><h3>Go to definition</h3><p>Jumps from a <code>ref('model')</code> to the model's file. Not available for sources or columns.</p></div>
-        <div class="card warn"><span class="badge">Partly</span><h3>Refresh after <code>dbt run</code></h3><p>Watches <code>target/run_results.json</code> and re-derives column lists from the compiled SQL. Can replace typed columns with untyped ones.</p></div>
+        <div class="card ok"><span class="badge">New in 0.4.2</span><h3>Hover</h3><p>Over <code>ref('…')</code> or <code>source(…)</code>: the model's file or the relation it reads, then its columns with types. Over <code>alias.column</code>: the column's type and where it comes from, or that the relation has no such column.</p></div>
+        <div class="card ok"><span class="badge">New in 0.4.2</span><h3>Diagnostics</h3><p>A <code>source()</code> no YAML declares, naming the file to add it to. A <code>ref()</code> to no model, seed or snapshot. A column the relation lacks, an ambiguous bare column, an unknown alias. Column checks stay quiet unless every relation's full column list is known.</p></div>
+        <div class="card ok"><span class="badge">On main</span><h3>Seeds</h3><p>CSVs under the seed paths are models to everything else: <code>ref()</code> completion, hover, go to definition, diagnostics. The header names the columns; the catalog or the warehouse adds types, found in a custom schema from YAML.</p></div>
+        <div class="card ok"><span class="badge">Works</span><h3>Go to definition</h3><p>Jumps from a <code>ref('…')</code> to the model's file, or the seed's CSV. Not available for sources or columns.</p></div>
+        <div class="card ok"><span class="badge">New in 0.4.2</span><h3>Keeps up with your edits</h3><p>Saving a <code>.yml</code> reloads sources; saving a model takes its columns from its own select when that names them all, so downstream checks do not wait for <code>dbt run</code>. New, removed and edited seeds are picked up too.</p></div>
+        <div class="card warn"><span class="badge">Partly</span><h3>Refresh after <code>dbt run</code></h3><p>Watches <code>target/run_results.json</code>, re-derives column lists from the compiled SQL and checks open files again. Can replace typed columns with untyped ones.</p></div>
         <div class="card ok"><span class="badge">Works</span><h3>Check without an editor</h3><p><code>dbt-ls check path/to/project</code> loads the project the way the server does and prints, per schema source, how many models got columns and types, how long it took, any error, and how many undocumented tables it found.</p></div>
         <div class="card ok"><span class="badge">Works</span><h3>Two editor commands</h3><p><code>dbt-ls.reload</code> rebuilds everything. <code>dbt-ls.current_model</code> returns the project root and the model's selector path so an editor can run it.</p></div>
         <div class="card ok"><span class="badge">Works</span><h3>Two editors</h3><p>Neovim through <code>vim.lsp.config</code>. A VS Code extension that starts one server per <code>dbt_project.yml</code> in the workspace.</p></div>
       </div>
-      <p class="note">Not implemented: diagnostics, seeds, snapshots, macros, rename, formatting.</p>
+      <p class="note">Not implemented: snapshots beyond <code>ref()</code> names, macros, rename, formatting, and code actions that edit YAML: declaring a source is left to you on purpose.</p>
     </section>
 
     <section id="platforms" data-toc="Platforms">
       <h2>What works on which platform</h2>
       <p>Most of the server does not depend on the warehouse. Only one thing does: reading live column names and types from it. That split is the key to making testing less tedious.</p>
       <div class="grid wide">
-        <div class="card ok"><span class="badge">Every dbt adapter</span><h3>No connection needed</h3><p>Model, source and CTE completion, go to definition, columns from YAML files, columns and types from <code>target/catalog.json</code>, and both commands. This includes Snowflake, BigQuery and Fabric.</p><p>No profile is needed for these.</p></div>
+        <div class="card ok"><span class="badge">Every dbt adapter</span><h3>No connection needed</h3><p>Model, seed, source and CTE completion, hover, go to definition, <code>ref</code> and <code>source</code> diagnostics, columns from YAML files and seed headers, columns and types from <code>target/catalog.json</code>, and both commands. Column diagnostics need full column lists, which without a warehouse come from the catalog or a model's own select. This includes Snowflake, BigQuery and Fabric.</p><p>No profile is needed for these.</p></div>
         <div class="card warn"><span class="badge">Nine adapters</span><h3>Live columns from the warehouse</h3><p>One function per adapter in <code>model.py</code>. Each lists the tables of every non-system schema; a shared step then matches them to models and sources by schema, and keeps the rest as undocumented tables.</p><p>DuckDB has real load tests. Postgres, MySQL, SQL Server and Spark Connect are tested against containers. The four cloud readers are tested against stand-in clients only.</p></div>
       </div>
       <div class="tablewrap">
@@ -76,5 +79,5 @@
           </tbody>
         </table>
       </div>
-      <p class="note">This describes main after 0.4.1. "Works" means the reader ran against a real instance in a test: DuckDB in the default run, the other four in the container tests, which CI runs on every push. The cloud platforms have not been run against a real account in any test. Not released yet: two fixes found by the container tests (the Spark extra, and SQL Server types with their precision), <code>--profiles-dir</code> / <code>DBT_PROFILES_DIR</code> support, and hover.<span data-internal> Which cloud platforms you verified by hand over the summer is not recorded anywhere in the repo, so I could not include it.</span></p>
+      <p class="note">This describes main after 0.4.2. "Works" means the reader ran against a real instance in a test: DuckDB in the default run, the other four in the container tests, which CI runs on every push. The cloud platforms have not been run against a real account in any test. Released in 0.4.2: the two fixes the container tests found (the Spark extra, and SQL Server types with their precision) and <code>--profiles-dir</code> / <code>DBT_PROFILES_DIR</code> support. Not released yet: seeds.<span data-internal> Which cloud platforms you verified by hand over the summer is not recorded anywhere in the repo, so I could not include it.</span></p>
     </section>

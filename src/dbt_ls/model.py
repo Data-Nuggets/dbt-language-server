@@ -300,6 +300,9 @@ def read_inline_locations(models: list[Model]) -> list[Model]:
     """
     located = []
     for model in models:
+        if model.model_type == "seed":
+            # A CSV: its location can only come from YAML.
+            continue
         try:
             sql = Path(model.path).read_text()
         except (OSError, UnicodeDecodeError, ValueError):
@@ -376,7 +379,7 @@ def enrich_models_from_catalog(models: list[Model], catalog_path: Path) -> list[
     # Build a lookup: model name -> columns
     columns_by_name: dict[str, tuple[Column, ...]] = {}
     for node in nodes.values():
-        if not node.get("unique_id", "").startswith("model."):
+        if not node.get("unique_id", "").startswith(("model.", "seed.")):
             continue
         name = node["metadata"]["name"]
         columns_by_name[name] = tuple(
@@ -1005,10 +1008,7 @@ def undocumented_tables(
 def enrich_models_from_config(dbt_root: str) -> list[Model]:
 
     def _parse_config(config: dict):
-        if "models" not in config.keys():
-            return []
-
-        return [
+        models = [
             Model(
                 m["name"],
                 Path(""),
@@ -1016,9 +1016,22 @@ def enrich_models_from_config(dbt_root: str) -> list[Model]:
                 tuple(Column(c["name"]) for c in m.get("columns") or []),
                 **_declared_location(m.get("config") or {}),
             )
-            for m in config["models"] or []
+            for m in config.get("models") or []
             if isinstance(m, dict) and "name" in m
         ]
+        # A seed's header already names every column, so its YAML only says
+        # where it is loaded.
+        seeds = [
+            Model(
+                s["name"],
+                Path(""),
+                model_type="seed",
+                **_declared_location(s.get("config") or {}),
+            )
+            for s in config.get("seeds") or []
+            if isinstance(s, dict) and "name" in s
+        ]
+        return models + seeds
 
     models: list[Model] = []
     config_files = []
