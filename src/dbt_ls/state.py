@@ -173,6 +173,39 @@ class ProjectState:
         if models:
             self.reconciliate_models(models)
 
+    def refresh_models(self):
+        """Model files found again after one came or went.
+
+        A model still on disk keeps everything found for it, and one only YAML
+        or a run knows about stays. A new file is matched against the last
+        warehouse read, so a table built before the file came (a `git pull`)
+        gives it columns at once.
+        """
+        files = {
+            m.name: m for m in discover_models(self.dbt_root, self.project.model_paths)
+        }
+        models = []
+        for model in self.models:
+            if model.model_type == "seed":
+                models.append(model)
+            elif (found := files.pop(model.name, None)) is not None:
+                models.append(replace(model, path=found.path))
+            elif model.path.suffix != ".sql":
+                models.append(model)
+            # Otherwise its file is gone, and so is the model.
+        new = list(files.values())
+        self.models = SourcedList([*models, *new], source="refresh_models")
+        if located := read_inline_locations(new):
+            self.reconciliate_models(located)
+        if not self.warehouse or self.profile_target is None:
+            return
+        fresh = {m.name for m in new}
+        candidates = [m for m in self.models if m.name in fresh]
+        if matched := match_models(candidates, self.warehouse, self.profile_target):
+            self.reconciliate_models(matched)
+        # A new model claims its table; a removed one leaves its table behind.
+        self.match_warehouse()
+
     def refresh_seeds(self):
         """Seeds read again after a CSV came, went or changed.
 

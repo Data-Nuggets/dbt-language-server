@@ -15,7 +15,7 @@
 | Hover | `textDocument/hover` | Over `ref('model')` or `source('src', 'table')`: the model's file or the source's relation, and its columns with types. Over `alias.column`: the column's type and the relation it belongs to. |
 | Diagnostics | `textDocument/publishDiagnostics` | Flags a `source()` no YAML declares, a `ref()` to no model, seed or snapshot, and columns the relations do not have. See [Diagnostics](#diagnostics). |
 | Seeds | `ref('...')`, hover, diagnostics | CSVs under `seed-paths` work like models. Their header gives the columns; the catalog or the warehouse gives the types. |
-| File watching | `workspace/didChangeWatchedFiles` | Reloads sources when a `.yml` changes, seeds when a `.csv` does, and model columns after `dbt run`. A saved model takes its columns from its own select when that names them all. |
+| File watching | `workspace/didChangeWatchedFiles` | Reloads sources when a `.yml` changes, seeds when a `.csv` does, models when a `.sql` is added, moved or deleted, and model columns after `dbt run`. A saved model takes its columns from its own select when that names them all. |
 | Config enrichment | on `initialize` | Reads documented columns from the hand-written `schema.yml` files, and where models and seeds are built. |
 | Catalog enrichment | on `initialize` | Reads model and source column info from `target/catalog.json` when available. |
 | Database enrichment | in the background after `initialize` | Reads column names and data types for models and sources directly from the connected warehouse. |

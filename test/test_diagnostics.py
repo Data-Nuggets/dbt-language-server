@@ -418,6 +418,9 @@ class TestRefNames:
             state=state,
             settings=Settings(),
             yaml_changed=False,
+            files_changed=False,
+            sql_columns={},
+            sql_before={},
             workspace=SimpleNamespace(text_documents={}),
         )
         new = tmp_path / "models" / "fresh.sql"

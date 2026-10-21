@@ -3,10 +3,10 @@
       <h1>What dbt-ls does, and where it stands</h1>
       <p class="lede">A language server that gives dbt SQL files completion for models, seeds, sources, CTEs and typed columns, hover, and diagnostics for what dbt or the warehouse would reject. These pages explain how to use it, how the code works and what works on which platform.<span data-internal> The Findings and Tasks tabs cover what is still broken and what to do next.</span></p>
       <div class="chips">
-        <span class="chip"><b>Release</b> 0.4.2</span>
+        <span class="chip"><b>Release</b> 0.4.3</span>
         <span class="chip" data-internal><b>Reviewed at</b> 0.3.8; updated 20 October 2026</span>
         <span class="chip"><b>Source</b> about 5,000 lines, 20 modules</span>
-        <span class="chip"><b>Tests</b> 435 pass, plus 17 against real containers</span>
+        <span class="chip"><b>Tests</b> 448 pass, plus 17 against real containers</span>
         <span class="chip"><b>Live backends</b> 9</span>
         <span class="chip"><b>Date</b> 20 October 2026</span>
       </div>
@@ -40,9 +40,9 @@
         <div class="card ok"><span class="badge">New in 0.4.1</span><h3>Loads in the background</h3><p>Names complete as soon as the files are read. The warehouse is read in one statement per database on a separate thread, and live columns follow.</p></div>
         <div class="card ok"><span class="badge">New in 0.4.2</span><h3>Hover</h3><p>Over <code>ref('…')</code> or <code>source(…)</code>: the model's file or the relation it reads, then its columns with types. Over <code>alias.column</code>: the column's type and where it comes from, or that the relation has no such column.</p></div>
         <div class="card ok"><span class="badge">New in 0.4.2</span><h3>Diagnostics</h3><p>A <code>source()</code> no YAML declares, naming the file to add it to. A <code>ref()</code> to no model, seed or snapshot. A column the relation lacks, an ambiguous bare column, an unknown alias. Column checks stay quiet unless every relation's full column list is known.</p></div>
-        <div class="card ok"><span class="badge">On main</span><h3>Seeds</h3><p>CSVs under the seed paths are models to everything else: <code>ref()</code> completion, hover, go to definition, diagnostics. The header names the columns; the catalog or the warehouse adds types, found in a custom schema from YAML.</p></div>
+        <div class="card ok"><span class="badge">New in 0.4.3</span><h3>Seeds</h3><p>CSVs under the seed paths are models to everything else: <code>ref()</code> completion, hover, go to definition, diagnostics. The header names the columns; the catalog or the warehouse adds types, found in a custom schema from YAML.</p></div>
         <div class="card ok"><span class="badge">Works</span><h3>Go to definition</h3><p>Jumps from a <code>ref('…')</code> to the model's file, or the seed's CSV. Not available for sources or columns.</p></div>
-        <div class="card ok"><span class="badge">New in 0.4.2</span><h3>Keeps up with your edits</h3><p>Saving a <code>.yml</code> reloads sources; saving a model takes its columns from its own select when that names them all, so downstream checks do not wait for <code>dbt run</code>. New, removed and edited seeds are picked up too.</p></div>
+        <div class="card ok"><span class="badge">New in 0.4.2</span><h3>Keeps up with your edits</h3><p>Saving a <code>.yml</code> reloads sources; saving a model takes its columns from its own select when that names them all, so downstream checks do not wait for <code>dbt run</code>. New, removed and edited seeds are picked up too, and so are model files added, moved or deleted: a new model completes in <code>ref('</code> at once. The model being edited is never offered to itself.</p></div>
         <div class="card warn"><span class="badge">Partly</span><h3>Refresh after <code>dbt run</code></h3><p>Watches <code>target/run_results.json</code>, re-derives column lists from the compiled SQL and checks open files again. Can replace typed columns with untyped ones.</p></div>
         <div class="card ok"><span class="badge">Works</span><h3>Check without an editor</h3><p><code>dbt-ls check path/to/project</code> loads the project the way the server does and prints, per schema source, how many models got columns and types, how long it took, any error, and how many undocumented tables it found.</p></div>
         <div class="card ok"><span class="badge">Works</span><h3>Two editor commands</h3><p><code>dbt-ls.reload</code> rebuilds everything. <code>dbt-ls.current_model</code> returns the project root and the model's selector path so an editor can run it.</p></div>
@@ -79,5 +79,5 @@
           </tbody>
         </table>
       </div>
-      <p class="note">This describes main after 0.4.2. "Works" means the reader ran against a real instance in a test: DuckDB in the default run, the other four in the container tests, which CI runs on every push. The cloud platforms have not been run against a real account in any test. Released in 0.4.2: the two fixes the container tests found (the Spark extra, and SQL Server types with their precision) and <code>--profiles-dir</code> / <code>DBT_PROFILES_DIR</code> support. Not released yet: seeds.<span data-internal> Which cloud platforms you verified by hand over the summer is not recorded anywhere in the repo, so I could not include it.</span></p>
+      <p class="note">This describes main after 0.4.3. "Works" means the reader ran against a real instance in a test: DuckDB in the default run, the other four in the container tests, which CI runs on every push. The cloud platforms have not been run against a real account in any test. Released in 0.4.2: the two fixes the container tests found (the Spark extra, and SQL Server types with their precision) and <code>--profiles-dir</code> / <code>DBT_PROFILES_DIR</code> support. Not released yet: seeds.<span data-internal> Which cloud platforms you verified by hand over the summer is not recorded anywhere in the repo, so I could not include it.</span></p>
     </section>

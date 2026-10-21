@@ -102,6 +102,7 @@ class TestOnSave:
             state=state,
             ast_cache=cache,
             sql_columns={},
+            sql_before={},
             workspace=SimpleNamespace(get_text_document=lambda _: document),
         )
 
@@ -135,3 +136,40 @@ class TestOnSave:
         uri, ls = self.server("select card_id, price from raw.cards")
 
         assert not columns_from_sql(ls, uri)
+
+    def save_again(self, ls, uri, text):
+        ls.ast_cache.refresh(uri, text)
+        document = TextDocument(uri=uri, source=text)
+        ls.workspace = SimpleNamespace(get_text_document=lambda _: document)
+        return columns_from_sql(ls, uri)
+
+    def test_a_later_select_that_does_not_name_everything_gives_them_back(self):
+        uri, ls = self.server(self.UPSTREAM)
+        columns_from_sql(ls, uri)
+
+        # `raw.cards` is unknown, so the `*` says nothing.
+        assert self.save_again(ls, uri, "select * from raw.cards")
+
+        (model,) = ls.state.models
+        assert (model.columns, model.all_columns) == (
+            STG_CARDS.columns,
+            STG_CARDS.all_columns,
+        )
+        assert ls.sql_columns == {} and ls.sql_before == {}
+
+    def test_so_does_a_save_that_does_not_parse(self):
+        uri, ls = self.server(self.UPSTREAM)
+        columns_from_sql(ls, uri)
+
+        assert self.save_again(ls, uri, "select c. from raw.cards c")
+
+        assert ls.state.models[0].columns == STG_CARDS.columns
+
+    def test_a_second_naming_save_still_remembers_the_first_columns(self):
+        uri, ls = self.server(self.UPSTREAM)
+        columns_from_sql(ls, uri)
+        self.save_again(ls, uri, "select card_id from raw.cards")
+
+        self.save_again(ls, uri, "select * from raw.cards")
+
+        assert ls.state.models[0].columns == STG_CARDS.columns

@@ -196,6 +196,7 @@ class TestRefresh:
             state=state,
             settings=Settings(),
             yaml_changed=False,
+            files_changed=False,
             workspace=SimpleNamespace(text_documents={}),
         )
         old.unlink()

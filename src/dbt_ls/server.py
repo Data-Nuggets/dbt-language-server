@@ -25,6 +25,7 @@ from dbt_ls.exceptions import *
 from dbt_ls.model import (
     _DATABASE_METHOD_REGISTRY,
     Model,
+    SourcedList,
     WarehouseTable,
     discover_ref_names,
 )
@@ -122,9 +123,14 @@ class DbtLanguageServer(LanguageServer):
         # Set when a .yml file changes, so a warehouse read that was still
         # running reads its sources again before it is adopted.
         self.yaml_changed = False
+        # The same for model files that came or went and seeds that changed.
+        self.files_changed = False
         # Models whose columns were taken from their saved SQL during this
         # load, so a warehouse read still running cannot undo it.
         self.sql_columns: dict[str, Model] = {}
+        # What those models had before their SQL was taken, to go back to
+        # when a later save no longer says what the columns are.
+        self.sql_before: dict[str, Model] = {}
 
 
 server = DbtLanguageServer()
@@ -390,7 +396,9 @@ def load_project(ls: DbtLanguageServer):
     generation = ls.load_generation
     ls.run_results_path = None
     ls.yaml_changed = False
+    ls.files_changed = False
     ls.sql_columns = {}
+    ls.sql_before = {}
 
     # Progress report setup
     token = "reload-project" + str(uuid.uuid4())
@@ -453,6 +461,9 @@ def load_project(ls: DbtLanguageServer):
         if ls.yaml_changed:
             reload_sources(late, ls.settings.schema_sources)
         late.ref_names = state.ref_names
+        if ls.files_changed:
+            late.refresh_models()
+            late.refresh_seeds()
         # Newer than the warehouse's columns for the same models.
         if ls.sql_columns:
             late.reconciliate_models(list(ls.sql_columns.values()))
@@ -530,12 +541,23 @@ def watched_files(ls: DbtLanguageServer, params: types.DidChangeWatchedFilesPara
         change.type != types.FileChangeType.Changed and _is_refable(path)
         for change, path in zip(params.changes, paths)
     )
+    models_changed = any(
+        change.type != types.FileChangeType.Changed and path and path.endswith(".sql")
+        for change, path in zip(params.changes, paths)
+    )
     seeds_changed = any(path and path.endswith(".csv") for path in paths)
     ls.yaml_changed |= yaml_changed
+    ls.files_changed |= models_changed or seeds_changed
     if ls.state is None or not (yaml_changed or refable or seeds_changed):
         return
     if yaml_changed:
         reload_sources(ls.state, ls.settings.schema_sources)
+    if models_changed:
+        ls.state.refresh_models()
+        # Columns taken from a file that is gone no longer hold.
+        names = {m.name for m in ls.state.models if m.path.suffix == ".sql"}
+        ls.sql_columns = {n: m for n, m in ls.sql_columns.items() if n in names}
+        ls.sql_before = {n: m for n, m in ls.sql_before.items() if n in names}
     if seeds_changed:
         ls.state.refresh_seeds()
     ls.state.ref_names = discover_ref_names(ls.state.dbt_root)
@@ -665,10 +687,10 @@ def columns_from_sql(ls: DbtLanguageServer, uri: str) -> bool:
         return False
     if parsed.source != neutralise_jinja(document.source):
         # Only a repaired or older parse: not what the file says.
-        return False
+        return _forget_sql_columns(ls, model)
     columns = model_columns(parsed.ast, state.models, state.sources, state.undocumented)
     if columns is None:
-        return False
+        return _forget_sql_columns(ls, model)
     # The warehouse's types are better than none for what still passes
     # through unchanged.
     columns = tuple(
@@ -678,8 +700,29 @@ def columns_from_sql(ls: DbtLanguageServer, uri: str) -> bool:
         return False
     log.info("Columns of %s from its SQL: %s", model.name, [c.name for c in columns])
     updated = replace(model, columns=columns, all_columns=True)
+    ls.sql_before.setdefault(model.name, model)
     ls.sql_columns[model.name] = updated
     state.reconciliate_models([updated])
+    return True
+
+
+def _forget_sql_columns(ls: DbtLanguageServer, model: Model) -> bool:
+    """Give back the columns a model had before an earlier save set them.
+
+    `select 1 as foo` saved, then `select *` from a model whose columns are
+    not all known: the SQL no longer says what the columns are, and `foo` is
+    not one of them. True when the model's columns changed.
+    """
+    if ls.sql_columns.pop(model.name, None) is None:
+        return False
+    before = ls.sql_before.pop(model.name)
+    restored = replace(model, columns=before.columns, all_columns=before.all_columns)
+    log.info("Columns of %s no longer from its SQL", model.name)
+    # Not reconciliate_models: an empty column list there means "nothing new".
+    ls.state.models = SourcedList(
+        [restored if m is model else m for m in ls.state.models],
+        source="columns_from_sql",
+    )
     return True
 
 
@@ -851,7 +894,9 @@ def serve_completions(
     ast_cache: AstCache,
     pos: types.Position,
 ):
-    models = state.models
+    # The model being edited cannot read itself: that would be a cycle.
+    this = to_fs_path(document.uri)
+    models = [m for m in state.models if str(m.path) != this]
     sources = state.sources
     undocumented = state.undocumented
     dbt_root = state.dbt_root
