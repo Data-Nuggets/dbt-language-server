@@ -36,7 +36,9 @@ def fake_server(root, sources="config,catalog,database"):
         load_generation=0,
         run_results_path=None,
         yaml_changed=False,
+        files_changed=False,
         sql_columns={},
+        sql_before={},
         # No documents open, so nothing to publish diagnostics for.
         workspace=SimpleNamespace(root_path=str(root), text_documents={}),
         client_capabilities=SimpleNamespace(window=None),
